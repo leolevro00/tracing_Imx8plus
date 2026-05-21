@@ -1,0 +1,15 @@
+## Descrizione dei test
+
+I grafici fanno riferimento ai valori contenuti nei seguenti file:
+
+### `TEST_no_hmi`
+
+Test eseguito senza avere attiva l'HMI.
+
+### `TEST_SI_HMI_BUTTON`
+
+Test eseguito con l'HMI accesa e interagendo con i bottoni.
+
+### `TEST_SI_hmi_no_button`
+
+Test eseguito con l'HMI accesa, ma senza interagire con i bottoni.
