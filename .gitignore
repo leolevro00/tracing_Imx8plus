@@ -1,0 +1,7 @@
+# File di trace molto grandi
+function_graph/traccia_valida_BACKUP
+*.dat
+*.trace
+*.csv
+Dump*.csv
+trace.dat

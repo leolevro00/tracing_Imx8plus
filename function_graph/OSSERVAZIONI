@@ -1,0 +1,5 @@
+Nel periodo in cui CPU3 risulta idle, arriva l’interrupt del timer architetturalNel periodo in cui CPU3 risulta idle, 
+arriva l’interrupt del timer architetturale ARM. Il kernel esegue il path del scheduler tick e degli hrtimer:
+ funzioni tick_*, accounting, scheduler_tick, perf_event_task_tick, aggiornamento load e riprogrammazione del 
+ prossimo evento timer. Quindi non c’è un processo utente concorrente, ma c’è lavoro kernel in interrupt context. 
+ Questo lavoro può allungarsi se le strutture dati del kernel subiscono cache miss o contesa memoria/bus.

@@ -1,0 +1,7 @@
+awk '{
+    match($0, /[0-9]+\.[0-9]{6}/);
+    current = substr($0, RSTART, RLENGTH);
+    if (NR == 1) start = current;
+    diff = current - 1391.325315-0.001443;
+    printf "%.6f %s\n", diff, $0;
+}' traccia_valida_003 | less
