@@ -200,6 +200,3 @@ La conclusione principale è:
 
 ---
 
-## 10. Frase sintetica da usare nel report
-
-> Nei test con `modetest`, il confronto tra 1280x720 e 640x480 mostra valori molto simili sulla CPU3. Questo indica che il semplice scanout di un framebuffer statico non è sufficiente a generare il jitter elevato osservato con `kmscube`. La differenza principale sembra quindi essere il rendering continuo, che genera traffico memoria/bus e può rallentare il path real-time.
