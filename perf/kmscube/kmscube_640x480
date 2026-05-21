@@ -1,0 +1,253 @@
+Welcome to Squeeze System TestSqIni
+
+GetCurrentDirectory() return 12: /opt/Squeeze
+
+SQENVInitGlobalTable() return code 0
+Retrieving information from squeeze.ini...
+Found DEFCN in ./Defcn
+
+ENVGetString() for IPAddress return code 0
+IPAddress read from squeeze.ini is: localhost
+GetCurrentDirectory returned: /opt/Squeeze
+Def InitBoard:./Defcn
+Perf PMU trovata: armv8_cortex_a53
+l2d_cache config=0x16
+l2d_cache_refill config=0x17
+bus_access config=0x19
+bus_cycles config=0x1d
+cpu_cycles config=0x11
+inst_retired config=0x8
+
+Maybe the threads is started OK!
+type:
+1 - to enable infotask
+2 - to disable infotask
+3 - to reset min-max infotask
+4 - type Q (or q) to exit...
+5 - type T (or q) to start tracing...
+enable infotask
+ infotask STARTED
+stoppo all'iterazione numero: 10000
+ RTC_HANDLER PROVA: 1760.84 us    MAX CASE: 2116 us    MIN CASE: 1402.88 us    NANOSLEEP AVG: 16.9339
+MAX CASE:il ritardo  della nanosleep in questo caso vale: 23us   con tempo di attivazione 1625us e attivazione handler: 2116us con posizione:5220
+MIN CASE:il ritardo  della nanosleep in questo caso vale: 19us   con tempo di attivazione 1233us e attivazione handler: 1402.88us con posizione:2446
+ora chiudo il semaforo
+il periodo massimo  della nanosleep si trova nell'iterazione numero: 1062 con valore 31
+il periodo minimo  della nanosleep si trova nell'iterazione numero: 3 con valore 15
+============================================================
+STATISTICHE FINALI PERF TOTALI
+============================================================
+Iterazioni valide          : 10001
+Media cpu_cycles totale    : 1260043
+Media inst_retired totale  : 690520
+Media IPC totale           : 0.577878
+Media CPI totale           : 1.764708
+Media cache miss totale    : 1.9395 %
+Media bus_access/bus_cycles: 0.004726
+Media bus_cycles/bus_access: 746.1711
+
+[MIN SLEEP]
+  Iterazione               : 3
+  Ritardo sleep            : 15 us
+  l2d_cache totale         : 35803
+  l2d_cache_refill totale  : 125
+  L2 cache miss totale     : 0.3491 %
+  bus_access totale        : 746
+  bus_cycles totale        : 572571
+  bus_access/bus_cycles    : 0.001303
+  bus_cycles/bus_access    : 767.5214
+  cpu_cycles totale        : 1116080
+  numero_istruzioni totale      : 677250
+  IPC totale               : 0.606811
+  CPI totale               : 1.647959
+
+[MAX SLEEP]
+  Iterazione               : 1062
+  Ritardo sleep            : 31 us
+  l2d_cache totale         : 67636
+  l2d_cache_refill totale  : 6861
+  L2 cache miss totale     : 10.1440 %
+  bus_access totale        : 30919
+  bus_cycles totale        : 1497345
+  bus_access/bus_cycles    : 0.020649
+  bus_cycles/bus_access    : 48.4280
+  cpu_cycles totale        : 2964804
+  numero_istruzioni totale      : 1120094
+  IPC totale               : 0.377797
+  CPI totale               : 2.646924
+
+============================================================
+STATISTICHE FINALI PERF PER CPU
+============================================================
+
+------------------------------------------------------------
+CPU0
+------------------------------------------------------------
+Iterazioni valide          : 10001
+Media cpu_cycles           : 887884
+Media inst_retired         : 516842
+Media IPC                  : 0.595544
+Media CPI                  : 1.699712
+Media cache miss           : 1.3208 %
+Media bus_access/bus_cycles: 0.003820
+Media bus_cycles/bus_access: 820.8583
+
+[MIN SLEEP]
+  Iterazione               : 3
+  Ritardo sleep            : 15 us
+  l2d_cache                : 25966
+  l2d_cache_refill         : 52
+  L2 cache miss            : 0.2003 %
+  bus_access               : 438
+  bus_cycles               : 423522
+  bus_access/bus_cycles    : 0.001034
+  bus_cycles/bus_access    : 966.9452
+  cpu_cycles               : 838841
+  numero_istruzioni        : 518589
+  IPC                      : 0.618221
+  CPI                      : 1.617545
+
+[MAX SLEEP]
+  Iterazione               : 1062
+  Ritardo sleep            : 31 us
+  l2d_cache                : 46283
+  l2d_cache_refill         : 4656
+  L2 cache miss            : 10.0598 %
+  bus_access               : 21915
+  bus_cycles               : 921162
+  bus_access/bus_cycles    : 0.023791
+  bus_cycles/bus_access    : 42.0334
+  cpu_cycles               : 1834782
+  numero_istruzioni        : 723882
+  IPC                      : 0.394533
+  CPI                      : 2.534642
+
+------------------------------------------------------------
+CPU1
+------------------------------------------------------------
+Iterazioni valide          : 10001
+Media cpu_cycles           : 99878
+Media inst_retired         : 38382
+Media IPC                  : 0.365681
+Media CPI                  : 2.842981
+Media cache miss           : 2.6378 %
+Media bus_access/bus_cycles: 0.006373
+Media bus_cycles/bus_access: 234.1171
+
+[MIN SLEEP]
+  Iterazione               : 3
+  Ritardo sleep            : 15 us
+  l2d_cache                : 3124
+  l2d_cache_refill         : 44
+  L2 cache miss            : 1.4085 %
+  bus_access               : 176
+  bus_cycles               : 39880
+  bus_access/bus_cycles    : 0.004413
+  bus_cycles/bus_access    : 226.5909
+  cpu_cycles               : 72082
+  numero_istruzioni        : 34277
+  IPC                      : 0.475528
+  CPI                      : 2.102926
+
+[MAX SLEEP]
+  Iterazione               : 1062
+  Ritardo sleep            : 31 us
+  l2d_cache                : 6237
+  l2d_cache_refill         : 490
+  L2 cache miss            : 7.8563 %
+  bus_access               : 2060
+  bus_cycles               : 105416
+  bus_access/bus_cycles    : 0.019542
+  bus_cycles/bus_access    : 51.1728
+  cpu_cycles               : 201820
+  numero_istruzioni        : 87283
+  IPC                      : 0.432479
+  CPI                      : 2.312249
+
+------------------------------------------------------------
+CPU2
+------------------------------------------------------------
+Iterazioni valide          : 10001
+Media cpu_cycles           : 113054
+Media inst_retired         : 36501
+Media IPC                  : 0.335149
+Media CPI                  : 3.076223
+Media cache miss           : 2.8602 %
+Media bus_access/bus_cycles: 0.005713
+Media bus_cycles/bus_access: 527.0717
+
+[MIN SLEEP]
+  Iterazione               : 3
+  Ritardo sleep            : 15 us
+  l2d_cache                : 2542
+  l2d_cache_refill         : 11
+  L2 cache miss            : 0.4327 %
+  bus_access               : 60
+  bus_cycles               : 30500
+  bus_access/bus_cycles    : 0.001967
+  bus_cycles/bus_access    : 508.3333
+  cpu_cycles               : 52131
+  numero_istruzioni        : 25430
+  IPC                      : 0.487810
+  CPI                      : 2.049980
+
+[MAX SLEEP]
+  Iterazione               : 1062
+  Ritardo sleep            : 31 us
+  l2d_cache                : 10747
+  l2d_cache_refill         : 1458
+  L2 cache miss            : 13.5666 %
+  bus_access               : 5916
+  bus_cycles               : 373627
+  bus_access/bus_cycles    : 0.015834
+  bus_cycles/bus_access    : 63.1553
+  cpu_cycles               : 738245
+  numero_istruzioni        : 209296
+  IPC                      : 0.283505
+  CPI                      : 3.527277
+
+------------------------------------------------------------
+CPU3
+------------------------------------------------------------
+Iterazioni valide          : 10001
+Media cpu_cycles           : 159227
+Media inst_retired         : 98794
+Media IPC                  : 0.623512
+Media CPI                  : 1.611551
+Media cache miss           : 1.5463 %
+Media bus_access/bus_cycles: 0.002969
+Media bus_cycles/bus_access: 1063.6748
+
+[MIN SLEEP]
+  Iterazione               : 3
+  Ritardo sleep            : 15 us
+  l2d_cache                : 4171
+  l2d_cache_refill         : 18
+  L2 cache miss            : 0.4316 %
+  bus_access               : 72
+  bus_cycles               : 78669
+  bus_access/bus_cycles    : 0.000915
+  bus_cycles/bus_access    : 1092.6250
+  cpu_cycles               : 153026
+  numero_istruzioni        : 98954
+  IPC                      : 0.646648
+  CPI                      : 1.546436
+
+[MAX SLEEP]
+  Iterazione               : 1062
+  Ritardo sleep            : 31 us
+  l2d_cache                : 4369
+  l2d_cache_refill         : 257
+  L2 cache miss            : 5.8824 %
+  bus_access               : 1028
+  bus_cycles               : 97140
+  bus_access/bus_cycles    : 0.010583
+  bus_cycles/bus_access    : 94.4942
+  cpu_cycles               : 189957
+  numero_istruzioni        : 99633
+  IPC                      : 0.524503
+  CPI                      : 1.906567
+
+============================================================
+Press a key to finally go out
+fine del trace
