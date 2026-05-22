@@ -3,5 +3,6 @@ function_graph/traccia_valida_BACKUP
 *.dat
 *.trace
 *.csv
+*:Zone.Identifier
 Dump*.csv
 trace.dat
