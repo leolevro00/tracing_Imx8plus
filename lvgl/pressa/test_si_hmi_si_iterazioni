@@ -1,48 +1,46 @@
-valore massimo della nanosleep negli ultimi 1000 attivazioni=124
-valore minimo della nanosleep negli ultimi 1000 attivazioni=11
-valore massimo della nanosleep negli ultimi 1000 attivazioni=124
-valore minimo della nanosleep negli ultimi 1000 attivazioni=11
+valore minimo della nanosleep delle ultime 222000 attivazioni vale = 11
 ============================================================
 STATISTICHE FINALI PERF TOTALI
 ============================================================
-Iterazioni valide          : 9999
-Media cpu_cycles totale    : 3038604
-Media istruzioni totale  : 1591895
-Media IPC totale           : 0.486389
-Media CPI totale           : 2.112652
-Media cache miss totale    : 12.2197 %
-Media bus_access/bus_cycles: 0.026241
-Media bus_cycles/bus_access: 50.2351
+Iterazioni valide buffer   : 10000
+Iterazioni osservate totali: 221653
+Media cpu_cycles totale    : 2236018
+Media istruzioni totale    : 1126333
+Media IPC totale           : 0.486089
+Media CPI totale           : 2.088892
+Media cache miss totale    : 9.0379 %
+Media bus_access/bus_cycles: 0.020206
+Media bus_cycles/bus_access: 62.6801
 
 [MIN rtc_handler_us]
-  Iterazione               : 6368
-  rtc_handler_us              : 11 us
-  l2d_cache totale         : 26040
-  l2d_cache_refill totale  : 763
-  L2 cache miss totale     : 2.9301 %
-  bus_access totale        : 3356
-  bus_cycles totale        : 392737
-  bus_access/bus_cycles    : 0.008545
-  bus_cycles/bus_access    : 117.0253
-  cpu_cycles totale        : 753569
-  istruzioni totale        : 415780
-  IPC totale               : 0.551748
-  CPI totale               : 1.812422
+  Iterazione               : 2507
+  rtc_handler_us              : 12 us
+  l2d_cache totale         : 34969
+  l2d_cache_refill totale  : 1190
+  L2 cache miss totale     : 3.4030 %
+  bus_access totale        : 5115
+  bus_cycles totale        : 541589
+  bus_access/bus_cycles    : 0.009444
+  bus_cycles/bus_access    : 105.8825
+  cpu_cycles totale        : 1052065
+  istruzioni totale        : 548334
+  IPC totale               : 0.521198
+  CPI totale               : 1.918657
 
 [MAX rtc_handler_us]
-  Iterazione               : 6192
-  rtc_handler_us              : 124 us
-  l2d_cache totale         : 71926
-  l2d_cache_refill totale  : 15773
-  L2 cache miss totale     : 21.9295 %
-  bus_access totale        : 105257
-  bus_cycles totale        : 2131660
-  bus_access/bus_cycles    : 0.049378
-  bus_cycles/bus_access    : 20.2520
-  cpu_cycles totale        : 4231642
-  istruzioni totale        : 3384051
-  IPC totale               : 0.799702
-  CPI totale               : 1.250466
+  Iterazione               : 9833
+  rtc_handler_us              : 119 us
+  l2d_cache totale         : 197546
+  l2d_cache_refill totale  : 28074
+  L2 cache miss totale     : 14.2114 %
+  bus_access totale        : 160941
+  bus_cycles totale        : 4241276
+  bus_access/bus_cycles    : 0.037946
+  bus_cycles/bus_access    : 26.3530
+  cpu_cycles totale        : 8451029
+  istruzioni totale        : 5369480
+  IPC totale               : 0.635364
+  CPI totale               : 1.573901
 
 ============================================================
 STATISTICHE FINALI PERF PER CPU
@@ -52,167 +50,263 @@ STATISTICHE FINALI PERF PER CPU
 CPU0
 ------------------------------------------------------------
 Iterazioni valide          : 10000
-Media cpu_cycles           : 934602
-Media istruzioni         : 492612
-Media IPC                  : 0.512649
-Media CPI                  : 2.012779
-Media cache miss           : 7.7679 %
-Media bus_access/bus_cycles: 0.020297
-Media bus_cycles/bus_access: 81.8996
+Media cpu_cycles           : 689722
+Media istruzioni           : 368739
+Media IPC                  : 0.534397
+Media CPI                  : 1.893630
+Media cache miss           : 4.9276 %
+Media bus_access/bus_cycles: 0.013305
+Media bus_cycles/bus_access: 107.7920
 
 [MIN rtc_handler_us]
-  Iterazione               : 6368
-  rtc_handler_us              : 11 us
-  l2d_cache                : 12840
-  l2d_cache_refill         : 123
-  L2 cache miss            : 0.9579 %
-  bus_access               : 786
-  bus_cycles               : 203050
-  bus_access/bus_cycles    : 0.003871
-  bus_cycles/bus_access    : 258.3333
-  cpu_cycles               : 396851
-  istruzioni               : 238256
-  IPC                      : 0.600366
-  CPI                      : 1.665650
+  Iterazione               : 2507
+  rtc_handler_us              : 12 us
+  l2d_cache                : 14931
+  l2d_cache_refill         : 340
+  L2 cache miss            : 2.2771 %
+  bus_access               : 1613
+  bus_cycles               : 247557
+  bus_access/bus_cycles    : 0.006516
+  bus_cycles/bus_access    : 153.4761
+  cpu_cycles               : 486181
+  istruzioni               : 274205
+  IPC                      : 0.563998
+  CPI                      : 1.773057
 
 [MAX rtc_handler_us]
-  Iterazione               : 6192
-  rtc_handler_us              : 124 us
-  l2d_cache                : 38926
-  l2d_cache_refill         : 7596
-  L2 cache miss            : 19.5139 %
-  bus_access               : 70592
-  bus_cycles               : 919194
-  bus_access/bus_cycles    : 0.076798
-  bus_cycles/bus_access    : 13.0212
-  cpu_cycles               : 1829272
-  istruzioni               : 2133146
-  IPC                      : 1.166117
-  CPI                      : 0.857547
+  Iterazione               : 9833
+  rtc_handler_us              : 119 us
+  l2d_cache                : 90800
+  l2d_cache_refill         : 7220
+  L2 cache miss            : 7.9515 %
+  bus_access               : 59347
+  bus_cycles               : 1566267
+  bus_access/bus_cycles    : 0.037891
+  bus_cycles/bus_access    : 26.3917
+  cpu_cycles               : 3123536
+  istruzioni               : 2192381
+  IPC                      : 0.701891
+  CPI                      : 1.424723
 
 ------------------------------------------------------------
 CPU1
 ------------------------------------------------------------
 Iterazioni valide          : 10000
-Media cpu_cycles           : 655806
-Media istruzioni         : 392610
-Media IPC                  : 0.407718
-Media CPI                  : 2.660779
-Media cache miss           : 8.0248 %
-Media bus_access/bus_cycles: 0.016207
-Media bus_cycles/bus_access: 354.6752
+Media cpu_cycles           : 388951
+Media istruzioni           : 212348
+Media IPC                  : 0.394507
+Media CPI                  : 2.665948
+Media cache miss           : 5.5540 %
+Media bus_access/bus_cycles: 0.012813
+Media bus_cycles/bus_access: 360.5993
 
 [MIN rtc_handler_us]
-  Iterazione               : 6368
-  rtc_handler_us              : 11 us
-  l2d_cache                : 1520
-  l2d_cache_refill         : 0
-  L2 cache miss            : 0.0000 %
-  bus_access               : 0
-  bus_cycles               : 13609
-  bus_access/bus_cycles    : 0.000000
-  bus_cycles/bus_access    : 0.0000
-  cpu_cycles               : 18101
-  istruzioni               : 5475
-  IPC                      : 0.302469
-  CPI                      : 3.306119
+  Iterazione               : 2507
+  rtc_handler_us              : 12 us
+  l2d_cache                : 4773
+  l2d_cache_refill         : 177
+  L2 cache miss            : 3.7084 %
+  bus_access               : 708
+  bus_cycles               : 65626
+  bus_access/bus_cycles    : 0.010788
+  bus_cycles/bus_access    : 92.6921
+  cpu_cycles               : 122359
+  istruzioni               : 54575
+  IPC                      : 0.446024
+  CPI                      : 2.242034
 
 [MAX rtc_handler_us]
-  Iterazione               : 6192
-  rtc_handler_us              : 124 us
-  l2d_cache                : 4902
-  l2d_cache_refill         : 627
-  L2 cache miss            : 12.7907 %
-  bus_access               : 2562
-  bus_cycles               : 154061
-  bus_access/bus_cycles    : 0.016630
-  bus_cycles/bus_access    : 60.1331
-  cpu_cycles               : 299296
-  istruzioni               : 54938
-  IPC                      : 0.183557
-  CPI                      : 5.447887
+  Iterazione               : 9833
+  rtc_handler_us              : 119 us
+  l2d_cache                : 46134
+  l2d_cache_refill         : 18275
+  L2 cache miss            : 39.6129 %
+  bus_access               : 73158
+  bus_cycles               : 1592393
+  bus_access/bus_cycles    : 0.045942
+  bus_cycles/bus_access    : 21.7665
+  cpu_cycles               : 3175781
+  istruzioni               : 2303730
+  IPC                      : 0.725406
+  CPI                      : 1.378539
 
 ------------------------------------------------------------
 CPU2
 ------------------------------------------------------------
 Iterazioni valide          : 10000
-Media cpu_cycles           : 643466
-Media istruzioni         : 384070
-Media IPC                  : 0.409946
-Media CPI                  : 2.649300
-Media cache miss           : 8.0397 %
-Media bus_access/bus_cycles: 0.019385
-Media bus_cycles/bus_access: 373.2974
+Media cpu_cycles           : 407244
+Media istruzioni           : 222434
+Media IPC                  : 0.395487
+Media CPI                  : 2.660270
+Media cache miss           : 5.4031 %
+Media bus_access/bus_cycles: 0.013819
+Media bus_cycles/bus_access: 247.4660
 
 [MIN rtc_handler_us]
-  Iterazione               : 6368
-  rtc_handler_us              : 11 us
-  l2d_cache                : 1528
-  l2d_cache_refill         : 0
-  L2 cache miss            : 0.0000 %
-  bus_access               : 0
-  bus_cycles               : 13543
-  bus_access/bus_cycles    : 0.000000
-  bus_cycles/bus_access    : 0.0000
-  cpu_cycles               : 18084
-  istruzioni               : 5474
-  IPC                      : 0.302699
-  CPI                      : 3.303617
+  Iterazione               : 2507
+  rtc_handler_us              : 12 us
+  l2d_cache                : 5058
+  l2d_cache_refill         : 276
+  L2 cache miss            : 5.4567 %
+  bus_access               : 1205
+  bus_cycles               : 69521
+  bus_access/bus_cycles    : 0.017333
+  bus_cycles/bus_access    : 57.6938
+  cpu_cycles               : 130278
+  istruzioni               : 52711
+  IPC                      : 0.404604
+  CPI                      : 2.471552
 
 [MAX rtc_handler_us]
-  Iterazione               : 6192
-  rtc_handler_us              : 124 us
-  l2d_cache                : 19943
-  l2d_cache_refill         : 6253
-  L2 cache miss            : 31.3544 %
-  bus_access               : 26890
-  bus_cycles               : 802101
-  bus_access/bus_cycles    : 0.033524
-  bus_cycles/bus_access    : 29.8290
-  cpu_cycles               : 1595206
-  istruzioni               : 1052030
-  IPC                      : 0.659495
-  CPI                      : 1.516312
+  Iterazione               : 9833
+  rtc_handler_us              : 119 us
+  l2d_cache                : 52635
+  l2d_cache_refill         : 1333
+  L2 cache miss            : 2.5325 %
+  bus_access               : 23418
+  bus_cycles               : 806362
+  bus_access/bus_cycles    : 0.029042
+  bus_cycles/bus_access    : 34.4334
+  cpu_cycles               : 1603780
+  istruzioni               : 733347
+  IPC                      : 0.457262
+  CPI                      : 2.186932
 
 ------------------------------------------------------------
 CPU3
 ------------------------------------------------------------
 Iterazioni valide          : 10000
-Media cpu_cycles           : 804426
-Media istruzioni         : 322443
-Media IPC                  : 0.410547
-Media CPI                  : 2.593378
-Media cache miss           : 14.9074 %
-Media bus_access/bus_cycles: 0.027057
-Media bus_cycles/bus_access: 41.0364
+Media cpu_cycles           : 750101
+Media istruzioni           : 322813
+Media IPC                  : 0.436835
+Media CPI                  : 2.389418
+Media cache miss           : 12.6600 %
+Media bus_access/bus_cycles: 0.024793
+Media bus_cycles/bus_access: 46.6911
 
 [MIN rtc_handler_us]
-  Iterazione               : 6368
-  rtc_handler_us              : 11 us
-  l2d_cache                : 10152
-  l2d_cache_refill         : 640
-  L2 cache miss            : 6.3042 %
-  bus_access               : 2570
-  bus_cycles               : 162535
-  bus_access/bus_cycles    : 0.015812
-  bus_cycles/bus_access    : 63.2432
-  cpu_cycles               : 320533
-  istruzioni               : 166575
-  IPC                      : 0.519681
-  CPI                      : 1.924256
+  Iterazione               : 2507
+  rtc_handler_us              : 12 us
+  l2d_cache                : 10207
+  l2d_cache_refill         : 397
+  L2 cache miss            : 3.8895 %
+  bus_access               : 1589
+  bus_cycles               : 158885
+  bus_access/bus_cycles    : 0.010001
+  bus_cycles/bus_access    : 99.9906
+  cpu_cycles               : 313247
+  istruzioni               : 166843
+  IPC                      : 0.532624
+  CPI                      : 1.877496
 
 [MAX rtc_handler_us]
-  Iterazione               : 6192
-  rtc_handler_us              : 124 us
-  l2d_cache                : 8155
-  l2d_cache_refill         : 1297
-  L2 cache miss            : 15.9044 %
-  bus_access               : 5213
-  bus_cycles               : 256304
-  bus_access/bus_cycles    : 0.020339
-  bus_cycles/bus_access    : 49.1663
-  cpu_cycles               : 507868
-  istruzioni               : 143937
-  IPC                      : 0.283414
-  CPI                      : 3.528405
+  Iterazione               : 9833
+  rtc_handler_us              : 119 us
+  l2d_cache                : 7977
+  l2d_cache_refill         : 1246
+  L2 cache miss            : 15.6199 %
+  bus_access               : 5018
+  bus_cycles               : 276254
+  bus_access/bus_cycles    : 0.018164
+  bus_cycles/bus_access    : 55.0526
+  cpu_cycles               : 547932
+  istruzioni               : 140022
+  IPC                      : 0.255546
+  CPI                      : 3.913185
 
+============================================================
+============================================================
+PEGGIORE ITERAZIONE PERF GLOBALE
+============================================================
+Iterazioni osservate totali: 221653
+
+[WORST rtc_handler_us]
+  Iterazione               : 10144
+  rtc_handler_us              : 122 us
+  l2d_cache totale         : 219097
+  l2d_cache_refill totale  : 34652
+  L2 cache miss totale     : 15.8158 %
+  bus_access totale        : 187250
+  bus_cycles totale        : 4866159
+  bus_access/bus_cycles    : 0.038480
+  bus_cycles/bus_access    : 25.9875
+  cpu_cycles totale        : 9702045
+  istruzioni totale        : 5928764
+  IPC totale               : 0.611084
+  CPI totale               : 1.636436
+
+============================================================
+PEGGIORE ITERAZIONE PERF PER CPU
+============================================================
+
+------------------------------------------------------------
+CPU0
+------------------------------------------------------------
+[WORST rtc_handler_us]
+  Iterazione               : 10144
+  rtc_handler_us              : 122 us
+  l2d_cache                : 88880
+  l2d_cache_refill         : 8183
+  L2 cache miss            : 9.2068 %
+  bus_access               : 64986
+  bus_cycles               : 1591598
+  bus_access/bus_cycles    : 0.040831
+  bus_cycles/bus_access    : 24.4914
+  cpu_cycles               : 3174536
+  istruzioni               : 2165994
+  IPC                      : 0.682303
+  CPI                      : 1.465625
+
+------------------------------------------------------------
+CPU1
+------------------------------------------------------------
+[WORST rtc_handler_us]
+  Iterazione               : 10144
+  rtc_handler_us              : 122 us
+  l2d_cache                : 47370
+  l2d_cache_refill         : 18743
+  L2 cache miss            : 39.5672 %
+  bus_access               : 75034
+  bus_cycles               : 1614796
+  bus_access/bus_cycles    : 0.046467
+  bus_cycles/bus_access    : 21.5209
+  cpu_cycles               : 3221050
+  istruzioni               : 2295444
+  IPC                      : 0.712638
+  CPI                      : 1.403236
+
+------------------------------------------------------------
+CPU2
+------------------------------------------------------------
+[WORST rtc_handler_us]
+  Iterazione               : 10144
+  rtc_handler_us              : 122 us
+  l2d_cache                : 53704
+  l2d_cache_refill         : 1544
+  L2 cache miss            : 2.8750 %
+  bus_access               : 22475
+  bus_cycles               : 806077
+  bus_access/bus_cycles    : 0.027882
+  bus_cycles/bus_access    : 35.8655
+  cpu_cycles               : 1603662
+  istruzioni               : 755228
+  IPC                      : 0.470940
+  CPI                      : 2.123414
+
+------------------------------------------------------------
+CPU3
+------------------------------------------------------------
+[WORST rtc_handler_us]
+  Iterazione               : 10144
+  rtc_handler_us              : 122 us
+  l2d_cache                : 29143
+  l2d_cache_refill         : 6182
+  L2 cache miss            : 21.2126 %
+  bus_access               : 24755
+  bus_cycles               : 853688
+  bus_access/bus_cycles    : 0.028998
+  bus_cycles/bus_access    : 34.4855
+  cpu_cycles               : 1702797
+  istruzioni               : 712098
+  IPC                      : 0.418193
+  CPI                      : 2.391240
