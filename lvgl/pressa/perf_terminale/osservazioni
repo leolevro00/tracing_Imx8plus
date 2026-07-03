@@ -1,0 +1,58 @@
+Puoi costruire una tabella di questo tipo:
+
+Misura			Interfaccia ferma	Interazione touch					Interpretazione
+CPU top PegExec		bassa/moderata		aumenta ma non satura					non sembra CPU-bound puro
+GPU memory gc/meminfo	SYSTEM Used ≈ 9.7 MB	da verificare, ma se resta simile non è alta		non sembra saturazione memoria GPU
+L2 cache PegExec	≈ 2M accessi/s		≈ 6–8M accessi/s					aumenta molto il lavoro memoria lato CPU
+L2 refill PegExec	≈ 0.3–0.4M/s		≈ 1.5–2M/s						più dati mancanti in L2, più traffico verso livelli inferiori
+L2 write-back PegExec	≈ 40–50k/s		≈ 600–980k/s						forte aumento delle scritture di dati modificati
+bus_access PegExec	≈ 1.2–2.4M/s		≈ 6–9M/s						aumenta molto pressione su bus/interconnect
+mem_access PegExec	≈ 13–17M/s		≈ 65–90M/s						molte più operazioni memoria durante touch
+DDR write globali	≈ 600–800k/s		picchi >2–3M/s						aumenta anche traffico memoria globale
+
+I comandi utilizzati per prendere queste misure sono stati:
+	 -> perf stat -p $PID -I 1000 \
+  	    -e l2d_cache,l2d_cache_refill,l2d_cache_wb. Dove
+
+		l2_cache = numeri di accessi in cache l2
+		l2d_cache_refill = numero di miss l2
+		l2d_cache_wb = scritture verso il basso per via di modifiche di file fatti in l2
+	
+
+	->  perf stat -p $PID -I 1000 \
+ 		-e bus_access,bus_cycles,mem_access. Dove 
+		
+		bus_access = numeri di accessi al bus
+		bus_cycles = numeri di cicli di bus
+		mem_access = numeri di accessi in memoria [ non definisce i numeri di accessi in ddr, ma semplicemente il numero di accessi verso strutture dati in memoria]
+
+	-> perf stat -a -I 1000 \
+  		-e imx8_ddr0/read-accesses/,imx8_ddr0/write-accesses/ Dove
+		
+		read-accesses = misuri dal punto di vista del controller DDR le letture arrivate alla DDR -> segnalo che non funziona infatti rimane sempre 0
+		write-accesses = misuri dal punto di vista del controller DDR le scritture arrivate alla DDR.
+		Specifico che in questo caso ho voluto misurare con -a tutto il sistema
+
+
+Dunque GPU o CPU ?
+
+l'interfaccia usa entrambe, ma i dati misurati puntano sopratutto a traffico memoria/bus generato dal processo GUI, piu che a saturazione GPU.
+Il dato  gc/meminfo dice solo :
+	POOL SYSTEM Used ≈ 9.7 MB
+	POOL VIRTUAL Used ≈ 7.4 MB
+
+cioè memoria allocata gpu è bassa rispetto al pool totale di 256 MB. Questo non significa che la gpu non lavori, ma significa che non hai evidenza di un problema di memoria gpu piena
+o crescita anomala di allocazioni gpu.
+
+OSS FINALE : 
+	Dai dati raccolti, l’interazione con l’interfaccia non sembra causare una saturazione della memoria GPU, mentre produce un aumento marcato degli accessi alla gerarchia di memoria e	    al bus da parte di PegExec. L’interferenza sembra quindi più legata al ridisegno della GUI, alle scritture nel framebuffer e agli aggiornamenti della texture, piuttosto che a un ut	ilizzo eccessivo della GPU in termini di memoria allocata.		
+
+
+Processo che avviene quando si interagisce con l'interfaccia : 
+touch/interazione
+→ PEG riceve molti eventi
+→ PEG ridisegna nel framebuffer software
+→ vengono prodotte dirty region
+→ SDL_UpdateTexture copia dati verso la texture
+→ aumentano accessi L2, write-back, bus_access e mem_access
+→ aumenta anche il traffico DDR globale in scrittura

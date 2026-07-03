@@ -1,0 +1,280 @@
+perf stat -p $PID -I 1000 \
+  -e l2d_cache,l2d_cache_refill,l2d_cache_wb
+#           time             counts unit events
+     1.001167250          2,006,589      l2d_cache                                                               (38.76%)
+     1.001167250            382,235      l2d_cache_refill                                                        (40.04%)
+     1.001167250             46,611      l2d_cache_wb                                                            (29.92%)
+     2.002039500          2,083,415      l2d_cache                                                               (33.79%)
+     2.002039500            350,899      l2d_cache_refill                                                        (37.30%)
+     2.002039500             53,607      l2d_cache_wb                                                            (37.19%)
+     3.003713875          1,857,254      l2d_cache                                                               (30.41%)
+     3.003713875            306,514      l2d_cache_refill                                                        (32.22%)
+     3.003713875             42,599      l2d_cache_wb                                                            (44.64%)
+     4.005331625          1,983,619      l2d_cache                                                               (37.89%)
+     4.005331625            366,284      l2d_cache_refill                                                        (33.64%)
+     4.005331625             40,168      l2d_cache_wb                                                            (35.28%)
+     5.006939500          1,897,069      l2d_cache                                                               (41.17%)
+     5.006939500            319,455      l2d_cache_refill                                                        (35.85%)
+     5.006939500             47,863      l2d_cache_wb                                                            (30.79%)
+     6.008510875          2,089,033      l2d_cache                                                               (40.51%)
+     6.008510875            380,242      l2d_cache_refill                                                        (31.45%)
+     6.008510875             45,689      l2d_cache_wb                                                            (35.93%)
+     7.010311875          1,942,751      l2d_cache                                                               (41.21%)
+     7.010311875            379,709      l2d_cache_refill                                                        (32.98%)
+     7.010311875             43,272      l2d_cache_wb                                                            (35.08%)
+     8.011922125          2,007,181      l2d_cache                                                               (35.12%)
+     8.011922125            379,277      l2d_cache_refill                                                        (36.71%)
+     8.011922125             47,360      l2d_cache_wb                                                            (36.36%)
+     9.013526375          2,002,299      l2d_cache                                                               (38.43%)
+     9.013526375            301,065      l2d_cache_refill                                                        (32.47%)
+     9.013526375             53,839      l2d_cache_wb                                                            (36.94%)
+    10.015106875          2,079,645      l2d_cache                                                               (34.01%)
+    10.015106875            431,418      l2d_cache_refill                                                        (31.96%)
+    10.015106875             49,322      l2d_cache_wb                                                            (41.31%)
+    11.016762250          1,828,709      l2d_cache                                                               (35.80%)
+    11.016762250            339,829      l2d_cache_refill                                                        (33.79%)
+    11.016762250             37,830      l2d_cache_wb                                                            (36.34%)
+    12.018461750          2,031,065      l2d_cache                                                               (36.58%)
+    12.018461750            381,977      l2d_cache_refill                                                        (38.47%)
+    12.018461750             51,193      l2d_cache_wb                                                            (32.59%)
+    13.020141875          4,235,913      l2d_cache                                                               (37.59%)
+    13.020141875          1,081,494      l2d_cache_refill                                                        (32.51%)
+    13.020141875            354,774      l2d_cache_wb                                                            (35.97%)
+    14.021737000          6,782,289      l2d_cache                                                               (34.28%)
+    14.021737000          1,736,634      l2d_cache_refill                                                        (36.83%)
+    14.021737000            809,071      l2d_cache_wb                                                            (33.80%)
+    15.023810625          7,105,329      l2d_cache                                                               (36.16%)
+    15.023810625          1,716,641      l2d_cache_refill                                                        (35.14%)
+    15.023810625            809,728      l2d_cache_wb                                                            (34.49%)
+    16.025431250          7,456,901      l2d_cache                                                               (36.43%)
+    16.025431250          1,937,743      l2d_cache_refill                                                        (35.10%)
+    16.025431250            902,051      l2d_cache_wb                                                            (33.42%)
+    17.027063875          6,869,308      l2d_cache                                                               (35.01%)
+    17.027063875          1,866,091      l2d_cache_refill                                                        (35.83%)
+    17.027063875            908,694      l2d_cache_wb                                                            (33.64%)
+    18.028633000          6,102,675      l2d_cache                                                               (35.93%)
+    18.028633000          1,695,335      l2d_cache_refill                                                        (31.95%)
+    18.028633000            637,820      l2d_cache_wb                                                            (36.80%)
+    19.030248375          4,010,341      l2d_cache                                                               (34.63%)
+    19.030248375          1,221,885      l2d_cache_refill                                                        (32.87%)
+    19.030248375             95,366      l2d_cache_wb                                                            (38.34%)
+    20.031870250          6,112,006      l2d_cache                                                               (35.44%)
+    20.031870250          1,573,367      l2d_cache_refill                                                        (33.49%)
+    20.031870250            624,106      l2d_cache_wb                                                            (35.59%)
+    21.033445875          7,026,627      l2d_cache                                                               (33.47%)
+    21.033445875          1,790,617      l2d_cache_refill                                                        (35.51%)
+    21.033445875            897,518      l2d_cache_wb                                                            (35.22%)
+    22.035048875          8,036,539      l2d_cache                                                               (34.72%)
+    22.035048875          2,042,487      l2d_cache_refill                                                        (34.33%)
+    22.035048875            983,281      l2d_cache_wb                                                            (35.25%)
+    23.036623000          3,394,722      l2d_cache                                                               (39.54%)
+    23.036623000            822,975      l2d_cache_refill                                                        (33.86%)
+    23.036623000            238,714      l2d_cache_wb                                                            (34.34%)
+    24.038277625          2,026,260      l2d_cache                                                               (39.33%)
+    24.038277625            386,013      l2d_cache_refill                                                        (32.27%)
+    24.038277625             39,375      l2d_cache_wb                                                            (38.31%)
+    25.039872000          2,136,337      l2d_cache                                                               (33.34%)
+    25.039872000            379,542      l2d_cache_refill                                                        (37.66%)
+    25.039872000             61,915      l2d_cache_wb                                                            (35.75%)
+c    26.041471500          2,043,591      l2d_cache                                                               (39.69%)
+    26.041471500            353,206      l2d_cache_refill                                                        (39.26%)
+    26.041471500             51,952      l2d_cache_wb                                                            (27.66%)
+^C#           time             counts unit events
+    26.832097875          1,683,582      l2d_cache                                                               (36.14%)
+    26.832097875            294,982      l2d_cache_refill                                                        (39.08%)
+    26.832097875             31,104      l2d_cache_wb                                                            (34.14%)
+
+root@avn8mp:~# perf stat -p $PID -I 1000 \
+  -e bus_access,bus_cycles,mem_access
+#           time             counts unit events
+     1.001112000          1,782,628      bus_access                                                              (39.20%)
+     1.001112000         41,644,916      bus_cycles                                                              (36.65%)
+     1.001112000         17,237,309      mem_access                                                              (31.97%)
+     2.002827375          1,230,528      bus_access                                                              (37.54%)
+     2.002827375         35,684,295      bus_cycles                                                              (37.92%)
+     2.002827375         14,961,374      mem_access                                                              (31.34%)
+     3.004372125          1,353,647      bus_access                                                              (39.45%)
+     3.004372125         35,049,417      bus_cycles                                                              (38.36%)
+     3.004372125         15,122,964      mem_access                                                              (30.70%)
+     4.006029875          1,421,633      bus_access                                                              (38.32%)
+     4.006029875         35,322,236      bus_cycles                                                              (34.02%)
+     4.006029875         13,817,768      mem_access                                                              (36.84%)
+     5.007686375          2,417,824      bus_access                                                              (33.93%)
+     5.007686375         41,653,307      bus_cycles                                                              (38.14%)
+     5.007686375         16,064,086      mem_access                                                              (35.63%)
+     6.009293375          1,346,814      bus_access                                                              (29.37%)
+     6.009293375         36,396,183      bus_cycles                                                              (48.77%)
+     6.009293375         14,150,897      mem_access                                                              (29.59%)
+     7.010931250          1,822,850      bus_access                                                              (32.52%)
+     7.010931250         42,019,333      bus_cycles                                                              (36.00%)
+     7.010931250         16,747,652      mem_access                                                              (36.86%)
+     8.012587875          1,556,265      bus_access                                                              (36.01%)
+     8.012587875         35,146,172      bus_cycles                                                              (39.97%)
+     8.012587875         12,679,551      mem_access                                                              (31.10%)
+     9.014258875          1,831,398      bus_access                                                              (35.17%)
+     9.014258875         39,657,807      bus_cycles                                                              (37.56%)
+     9.014258875         16,776,649      mem_access                                                              (35.45%)
+    10.015862625          1,668,585      bus_access                                                              (31.27%)
+    10.015862625         37,500,765      bus_cycles                                                              (36.13%)
+    10.015862625         14,586,632      mem_access                                                              (39.06%)
+    11.017075875          1,782,476      bus_access                                                              (34.78%)
+    11.017075875         37,503,941      bus_cycles                                                              (34.37%)
+    11.017075875         14,702,470      mem_access                                                              (37.75%)
+    12.018662375          7,967,331      bus_access                                                              (33.60%)
+    12.018662375        142,818,304      bus_cycles                                                              (35.63%)
+    12.018662375         75,268,680      mem_access                                                              (35.67%)
+    13.020256500          7,532,124      bus_access                                                              (34.45%)
+    13.020256500        131,291,442      bus_cycles                                                              (36.26%)
+    13.020256500         68,124,578      mem_access                                                              (33.65%)
+    14.021885875          6,002,631      bus_access                                                              (33.80%)
+    14.021885875        126,000,659      bus_cycles                                                              (34.15%)
+    14.021885875         64,571,180      mem_access                                                              (35.81%)
+    15.023536375          8,534,063      bus_access                                                              (36.47%)
+    15.023536375        162,390,877      bus_cycles                                                              (34.26%)
+    15.023536375         89,532,067      mem_access                                                              (33.99%)
+    16.025224625          8,138,393      bus_access                                                              (35.37%)
+    16.025224625        152,696,308      bus_cycles                                                              (35.02%)
+    16.025224625         81,843,641      mem_access                                                              (34.17%)
+    17.026807375          9,072,847      bus_access                                                              (34.44%)
+    17.026807375        176,258,177      bus_cycles                                                              (34.86%)
+    17.026807375         90,310,256      mem_access                                                              (34.94%)
+    18.028711875          7,775,508      bus_access                                                              (36.06%)
+    18.028711875        149,093,855      bus_cycles                                                              (34.68%)
+    18.028711875         81,502,566      mem_access                                                              (34.30%)
+    19.030344875          2,510,981      bus_access                                                              (34.04%)
+    19.030344875         51,879,826      bus_cycles                                                              (37.36%)
+    19.030344875         22,074,993      mem_access                                                              (34.33%)
+    20.032031500          1,438,385      bus_access                                                              (33.26%)
+    20.032031500         36,209,863      bus_cycles                                                              (36.27%)
+    20.032031500         13,829,070      mem_access                                                              (39.47%)
+    21.033624250          2,222,752      bus_access                                                              (41.47%)
+    21.033624250         43,986,834      bus_cycles                                                              (31.03%)
+    21.033624250         18,675,885      mem_access                                                              (36.04%)
+    22.035337625          3,791,690      bus_access                                                              (33.52%)
+    22.035337625         72,925,003      bus_cycles                                                              (34.72%)
+    22.035337625         35,130,239      mem_access                                                              (37.45%)
+    23.036939875          6,824,061      bus_access                                                              (37.93%)
+    23.036939875        105,687,113      bus_cycles                                                              (31.49%)
+    23.036939875         52,570,364      mem_access                                                              (36.01%)
+    24.038530250          8,214,607      bus_access                                                              (33.23%)
+    24.038530250        122,809,599      bus_cycles                                                              (34.26%)
+    24.038530250         61,827,789      mem_access                                                              (37.81%)
+    25.040132875          7,941,570      bus_access                                                              (34.85%)
+    25.040132875        117,611,478      bus_cycles                                                              (34.48%)
+    25.040132875         51,533,494      mem_access                                                              (35.63%)
+    26.040899000          7,174,348      bus_access                                                              (35.58%)
+    26.040899000        116,717,975      bus_cycles                                                              (32.98%)
+    26.040899000         58,195,457      mem_access                                                              (36.27%)
+#           time             counts unit events
+    27.042450125          4,461,952      bus_access                                                              (35.54%)
+    27.042450125         81,547,909      bus_cycles                                                              (37.05%)
+    27.042450125         41,743,265      mem_access                                                              (32.34%)
+    28.044102875          1,819,624      bus_access                                                              (28.09%)
+    28.044102875         40,503,706      bus_cycles                                                              (33.59%)
+    28.044102875         16,832,713      mem_access                                                              (44.67%)
+    29.045711500          2,201,015      bus_access                                                              (37.42%)
+    29.045711500         48,119,647      bus_cycles                                                              (34.43%)
+    29.045711500         21,482,177      mem_access                                                              (34.51%)
+    30.047373875          1,577,163      bus_access                                                              (39.29%)
+    30.047373875         39,162,248      bus_cycles                                                              (36.05%)
+    30.047373875         18,012,277      mem_access                                                              (31.92%)
+    31.048966875          1,934,599      bus_access                                                              (37.73%)
+    31.048966875         44,811,606      bus_cycles                                                              (31.05%)
+    31.048966875         19,326,199      mem_access                                                              (38.31%)
+    32.050599625          1,979,103      bus_access                                                              (36.56%)
+    32.050599625         46,218,442      bus_cycles                                                              (36.52%)
+    32.050599625         21,518,367      mem_access                                                              (35.34%)
+    33.052206875          4,439,959      bus_access                                                              (35.87%)
+    33.052206875         92,037,224      bus_cycles                                                              (31.75%)
+    33.052206875         43,519,809      mem_access                                                              (37.96%)
+    34.053862625          7,965,046      bus_access                                                              (34.08%)
+    34.053862625        137,411,957      bus_cycles                                                              (35.20%)
+    34.053862625         64,982,044      mem_access                                                              (35.29%)
+    35.055538500         13,038,859      bus_access                                                              (34.78%)
+    35.055538500        205,479,931      bus_cycles                                                              (35.31%)
+    35.055538500        108,837,327      mem_access                                                              (34.72%)
+    36.057175000          7,723,401      bus_access                                                              (35.14%)
+    36.057175000        136,271,510      bus_cycles                                                              (35.99%)
+    36.057175000         73,060,293      mem_access                                                              (34.00%)
+^C    36.910783500          1,927,268      bus_access                                                              (37.14%)
+    36.910783500         40,736,280      bus_cycles                                                              (39.08%)
+    36.910783500         16,593,445      mem_access                                                              (32.14%)
+
+root@avn8mp:~# perf stat -a -I 1000 \
+  -e imx8_ddr0/read-accesses/,imx8_ddr0/write-accesses/
+#           time             counts unit events
+     1.001058000                  0      imx8_ddr0/read-accesses/
+     1.001058000            790,247      imx8_ddr0/write-accesses/
+     2.003686500                  0      imx8_ddr0/read-accesses/
+     2.003686500            678,241      imx8_ddr0/write-accesses/
+     3.005198500                  0      imx8_ddr0/read-accesses/
+     3.005198500            627,007      imx8_ddr0/write-accesses/
+     4.006594125                  0      imx8_ddr0/read-accesses/
+     4.006594125            724,127      imx8_ddr0/write-accesses/
+     5.007988375                  0      imx8_ddr0/read-accesses/
+     5.007988375            715,513      imx8_ddr0/write-accesses/
+     6.009403750                  0      imx8_ddr0/read-accesses/
+     6.009403750            615,231      imx8_ddr0/write-accesses/
+     7.010163625                  0      imx8_ddr0/read-accesses/
+     7.010163625            816,516      imx8_ddr0/write-accesses/
+     8.010669875                  0      imx8_ddr0/read-accesses/
+     8.010669875            616,030      imx8_ddr0/write-accesses/
+     9.012097000                  0      imx8_ddr0/read-accesses/
+     9.012097000            715,137      imx8_ddr0/write-accesses/
+    10.013442500                  0      imx8_ddr0/read-accesses/
+    10.013442500            717,174      imx8_ddr0/write-accesses/
+    11.014781000                  0      imx8_ddr0/read-accesses/
+    11.014781000            716,139      imx8_ddr0/write-accesses/
+    12.016194750                  0      imx8_ddr0/read-accesses/
+    12.016194750            612,146      imx8_ddr0/write-accesses/
+    13.017552750                  0      imx8_ddr0/read-accesses/
+    13.017552750          1,391,031      imx8_ddr0/write-accesses/
+    14.018951000                  0      imx8_ddr0/read-accesses/
+    14.018951000            886,975      imx8_ddr0/write-accesses/
+    15.020564875                  0      imx8_ddr0/read-accesses/
+    15.020564875          1,013,145      imx8_ddr0/write-accesses/
+    16.021951750                  0      imx8_ddr0/read-accesses/
+    16.021951750            918,577      imx8_ddr0/write-accesses/
+    17.023308500                  0      imx8_ddr0/read-accesses/
+    17.023308500            707,393      imx8_ddr0/write-accesses/
+    18.024667750                  0      imx8_ddr0/read-accesses/
+    18.024667750            803,552      imx8_ddr0/write-accesses/
+    19.025827500                  0      imx8_ddr0/read-accesses/
+    19.025827500          1,571,574      imx8_ddr0/write-accesses/
+    20.027193375                  0      imx8_ddr0/read-accesses/
+    20.027193375          2,487,743      imx8_ddr0/write-accesses/
+    21.028553250                  0      imx8_ddr0/read-accesses/
+    21.028553250          2,492,818      imx8_ddr0/write-accesses/
+    22.029924125                  0      imx8_ddr0/read-accesses/
+    22.029924125          2,450,521      imx8_ddr0/write-accesses/
+    23.031275625                  0      imx8_ddr0/read-accesses/
+    23.031275625          1,429,958      imx8_ddr0/write-accesses/
+    24.032621375                  0      imx8_ddr0/read-accesses/
+    24.032621375            877,681      imx8_ddr0/write-accesses/
+    25.033991750                  0      imx8_ddr0/read-accesses/
+    25.033991750            997,836      imx8_ddr0/write-accesses/
+    26.035329375                  0      imx8_ddr0/read-accesses/
+    26.035329375          1,006,675      imx8_ddr0/write-accesses/
+#           time             counts unit events
+    27.036695625                  0      imx8_ddr0/read-accesses/
+    27.036695625          1,000,223      imx8_ddr0/write-accesses/
+    28.038105500                  0      imx8_ddr0/read-accesses/
+    28.038105500          1,634,931      imx8_ddr0/write-accesses/
+    29.039471000                  0      imx8_ddr0/read-accesses/
+    29.039471000          2,882,847      imx8_ddr0/write-accesses/
+    30.040812750                  0      imx8_ddr0/read-accesses/
+    30.040812750          3,137,934      imx8_ddr0/write-accesses/
+    31.042317000                  0      imx8_ddr0/read-accesses/
+    31.042317000          2,985,310      imx8_ddr0/write-accesses/
+    32.043681250                  0      imx8_ddr0/read-accesses/
+    32.043681250          1,997,002      imx8_ddr0/write-accesses/
+    33.045074625                  0      imx8_ddr0/read-accesses/
+    33.045074625            775,598      imx8_ddr0/write-accesses/
+    34.046465125                  0      imx8_ddr0/read-accesses/
+    34.046465125            582,628      imx8_ddr0/write-accesses/
+    35.047815000                  0      imx8_ddr0/read-accesses/
+    35.047815000            674,188      imx8_ddr0/write-accesses/
+^C    35.352320375                  0      imx8_ddr0/read-accesses/
+    35.352320375            159,177      imx8_ddr0/write-accesses/
+
+root@avn8mp:~#
