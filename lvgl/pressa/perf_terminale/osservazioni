@@ -41,6 +41,36 @@ Il dato  gc/meminfo dice solo :
 	POOL SYSTEM Used ≈ 9.7 MB
 	POOL VIRTUAL Used ≈ 7.4 MB
 
+
+Valore di watch -n 0.5 "cat /sys/kernel/debug/gc/meminfo" con interfaccia spenta
+
+VIDEO MEMORY:
+  POOL SYSTEM:
+    Free :        268413936 B
+    Used :            21520 B
+    MinFree :     259782536 B
+    MaxUsed :       8652920 B
+    Total :       268435456 B
+  POOL VIRTUAL:
+    Used :             0 B
+    MaxUsed :          0 B
+
+Valore di watch -n  0.5s : "cat /sys/kernel/debug/gc/meminfo" con interfaccia attiva
+
+VIDEO MEMORY:
+  POOL SYSTEM:
+    Free :        259782536 B
+    Used :          8652920 B
+    MinFree :     259782536 B
+    MaxUsed :       8652920 B
+    Total :       268435456 B
+  POOL VIRTUAL:
+    Used :       7389184 B
+    MaxUsed :    7389184 B
+
+Con interfaccia spenta la gpu praticamente non alloca memoria; Valori che con interfaccia attiva restano stabili durante il touch, quindi non sembra esserci un aumento dinamico dell'uso memoria gpu durante l'interazione
+
+
 cioè memoria allocata gpu è bassa rispetto al pool totale di 256 MB. Questo non significa che la gpu non lavori, ma significa che non hai evidenza di un problema di memoria gpu piena
 o crescita anomala di allocazioni gpu.
 
@@ -56,3 +86,8 @@ touch/interazione
 → SDL_UpdateTexture copia dati verso la texture
 → aumentano accessi L2, write-back, bus_access e mem_access
 → aumenta anche il traffico DDR globale in scrittura
+
+
+
+
+
