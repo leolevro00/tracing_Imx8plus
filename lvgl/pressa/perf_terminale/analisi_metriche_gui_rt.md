@@ -1540,105 +1540,730 @@ Ridurre questa baseline aiuta anche senza interazione.
 
 ---
 
-## 24. Conclusione tecnica
-
-I dati mostrano chiaramente due comportamenti.
-
-A riposo, l’interfaccia produce già aggiornamenti periodici della texture, con circa 7–9 upload al secondo, circa 0.75–1 MB/s di dati copiati e circa 22–30 ms/s spesi in `SDL_UpdateTexture()`.
-
-Durante l’interazione touch, il comportamento cambia in modo netto: il numero di upload sale spesso a 14–20 al secondo, il volume copiato cresce fino a circa 5–8 MB/s, il tempo trascorso in `SDL_UpdateTexture()` arriva fino a circa 60–97 ms/s e la dirty region massima raggiunge spesso 614400 pixel, cioè l’intero schermo a 960×640.
-
-Questo indica che il problema principale non è semplicemente “la GUI usa CPU”, né una crescita della memoria GPU allocata. La memoria GPU resta contenuta e stabile durante l’interazione. Il dato più rilevante è invece l’aumento del traffico memoria/cache/bus causato dagli aggiornamenti grafici, in particolare quando le dirty region diventano grandi quanto tutto lo schermo.
-
 ---
 
-## 25. Frase pronta per relazione o tesi
+## 24. Scenario C: trascinamento di un grafico tramite touch
 
-> La strumentazione introdotta in `uploadDirtyRegion()` mostra che, durante l’interazione con il touchscreen, la GUI aumenta sia la frequenza degli aggiornamenti della texture sia la dimensione delle regioni aggiornate. In condizioni di riposo si osservano circa 7–9 upload al secondo, con un traffico inferiore a 1 MB/s e circa 22–30 ms/s spesi in `SDL_UpdateTexture()`. Durante la pressione o il trascinamento, invece, gli upload salgono fino a 14–20 al secondo, il traffico raggiunge circa 5–8 MB/s e il tempo speso in `SDL_UpdateTexture()` arriva fino a circa 60–97 ms/s. Inoltre, la dirty region massima raggiunge spesso 614400 pixel, corrispondenti all’intero schermo a 960×640. Questi risultati suggeriscono che l’interferenza osservata sia legata principalmente al traffico memoria generato dal ridisegno della GUI e dall’aggiornamento della texture, più che a una saturazione della CPU o a un incremento dell’occupazione di memoria GPU.
+Dopo le prime misure su riposo e interazione generica, è stato analizzato anche uno scenario più pesante: **il trascinamento tramite touch di un grafico visualizzato sullo schermo**.
 
----
+Questo scenario è particolarmente importante perché un grafico in movimento non aggiorna soltanto un piccolo bottone o un cursore: spesso costringe il sistema a ridisegnare una porzione ampia della schermata, per esempio l’intera area del grafico, la griglia, le curve, gli assi o il contenitore grafico.
 
-## 26. Checklist rapida da usare davanti al terminale
-
-| Se vedi... | Significa probabilmente... | Cosa controllare |
-|---|---|---|
-| `calls` alte | molti redraw / molti eventi | touch motion, timer, invalidazioni |
-| `reqMBps` alto | molti pixel copiati | dirty region grandi |
-| `updateMs` alto | molto tempo dentro SDL_UpdateTexture | costo diretto per RT |
-| `effMBps` basso | tanti upload piccoli / overhead alto | frammentazione update |
-| `effMBps` alto + `reqMBps` alto | copie grandi efficienti ma pesanti | full-screen update |
-| `maxRectPx=614400` | full-screen upload | chi invalida tutto |
-| GPU meminfo stabile | no nuove allocazioni GPU | non esclude carico GPU |
-| `l2d_cache_wb` alto | molte scritture dirty fuori da L2 | framebuffer/texture upload |
-| `bus_access` alto | più pressione su bus/interconnect | correlare con touch |
-| DDR write globali alti | più traffico DDR di sistema | correlare con PegExec/perf |
-
----
-
-## 27. Mini-glossario
-
-### Upload
-
-Copia di pixel dal framebuffer software alla texture SDL.
-
-### Dirty region
-
-Zona dello schermo che è cambiata e deve essere aggiornata.
-
-### Full-screen update
-
-Aggiornamento di una regione grande quanto tutto lo schermo.
-
-### Bounding box
-
-Rettangolo minimo che contiene una o più dirty region. Se le regioni sono lontane, il bounding box può diventare molto grande.
-
-### RGB565
-
-Formato pixel a 16 bit: 5 bit rosso, 6 bit verde, 5 bit blu. Occupa 2 byte per pixel.
-
-### PMU
-
-Performance Monitoring Unit. Hardware interno al processore/SoC che conta eventi come cache miss, accessi memoria, cicli bus.
-
-### L2 refill
-
-Dati caricati nella cache L2 perché mancavano.
-
-### L2 write-back
-
-Dati modificati in L2 scritti verso livelli inferiori.
-
-### DDR PMU
-
-Contatore prestazionale del controller DDR. Misura eventi globali della memoria esterna, non di un singolo processo.
-
-### GPU meminfo
-
-File debug del driver GPU che mostra memoria grafica allocata. Non misura direttamente carico GPU o banda DDR.
-
----
-
-## 28. Idea centrale da ricordare
-
-La metrica più importante non è una sola.
-
-Bisogna leggere insieme:
+I log raccolti sono di questo tipo:
 
 ```text
-calls      → quante volte aggiorno
-reqMBps    → quanti dati muovo
-updateMs   → quanto tempo perdo
-maxRectPx  → quanto grande è la dirty region
+[RT] uploadDirtyRegion: calls=44 req=1.69MB reqMBps=1.67 updateMs=130.150 effMBps=13.0 maxRectPx=291264
+[RT] uploadDirtyRegion: calls=48 req=1.75MB reqMBps=1.73 updateMs=140.368 effMBps=12.5 maxRectPx=290608
+[RT] uploadDirtyRegion: calls=43 req=2.22MB reqMBps=2.19 updateMs=129.348 effMBps=17.1 maxRectPx=306299
+[RT] uploadDirtyRegion: calls=39 req=4.17MB reqMBps=4.05 updateMs=129.332 effMBps=32.2 maxRectPx=374625
+[RT] uploadDirtyRegion: calls=33 req=24.74MB reqMBps=24.09 updateMs=216.366 effMBps=114.4 maxRectPx=485051
+[RT] uploadDirtyRegion: calls=33 req=24.37MB reqMBps=23.75 updateMs=207.857 effMBps=117.3 maxRectPx=485051
+[RT] uploadDirtyRegion: calls=33 req=24.37MB reqMBps=23.77 updateMs=208.219 effMBps=117.1 maxRectPx=485051
+[RT] uploadDirtyRegion: calls=33 req=24.58MB reqMBps=23.95 updateMs=212.522 effMBps=115.7 maxRectPx=485051
+[RT] uploadDirtyRegion: calls=23 req=15.88MB reqMBps=14.78 updateMs=140.663 effMBps=112.9 maxRectPx=485051
 ```
 
-Nel caso osservato, il problema emerge quando questi valori crescono insieme:
+---
+
+### 24.1 Lettura generale dello scenario
+
+Il trascinamento del grafico produce un regime più pesante rispetto al semplice tap o all’interazione leggera.
+
+Nei dati si vedono due fasi principali:
 
 ```text
-calls alte
-reqMBps alto
-updateMs alto
-maxRectPx full-screen
+fase iniziale:
+  calls molto alte, circa 39–48/s
+  reqMBps relativamente basso, circa 1.7–4.0 MB/s
+  updateMs alto, circa 129–140 ms/s
+  effMBps basso, circa 12–32 MB/s
+
+fase stabile di drag grafico:
+  calls circa 33/s
+  reqMBps circa 23.7–24.1 MB/s
+  updateMs circa 208–220 ms/s
+  effMBps circa 111–117 MB/s
+  maxRectPx fisso a 485051 px
 ```
 
-Questa combinazione indica che l’interazione con la GUI non sta solo generando più eventi, ma sta causando aggiornamenti grafici grandi e costosi, con effetti visibili anche sui contatori cache, bus e DDR.
+Quindi il sistema passa da un regime con **molte chiamate piccole/medie e molto overhead** a un regime con **upload grandi, continui e costosi**.
+
+---
+
+### 24.2 Prime righe: molte chiamate, pochi MB, tanto overhead
+
+Esempi:
+
+```text
+calls=44 req=1.69MB reqMBps=1.67 updateMs=130.150 effMBps=13.0 maxRectPx=291264
+calls=48 req=1.75MB reqMBps=1.73 updateMs=140.368 effMBps=12.5 maxRectPx=290608
+```
+
+In queste righe il dato più evidente è:
+
+```text
+calls molto alte
+reqMBps non altissimo
+updateMs molto alto
+effMBps basso
+```
+
+Questo significa che il sistema sta facendo **molti upload piccoli o medi**. Il volume totale di dati non è ancora enorme, ma il tempo speso dentro `SDL_UpdateTexture()` è già alto.
+
+La spiegazione probabile è che ogni chiamata abbia un costo fisso:
+
+```text
+- ingresso in SDL_UpdateTexture()
+- gestione del rettangolo
+- controlli interni SDL
+- possibile gestione/lock della texture
+- interazione con il backend grafico
+- copia effettiva dei pixel
+```
+
+Quando si fanno tante chiamate con pochi dati per chiamata, il costo fisso pesa molto. Per questo `effMBps` risulta basso.
+
+Esempio:
+
+```text
+req=1.69 MB
+updateMs=130.150 ms
+```
+
+Formula:
+
+```text
+effMBps = 1.69 / 0.130150 ≈ 13.0 MB/s
+```
+
+Questa non è una situazione di banda enorme, ma è comunque negativa per il real-time perché si spendono già circa:
+
+```text
+130 ms / 1000 ms = 13% di un core equivalente
+```
+
+solo dentro l’upload della texture.
+
+---
+
+### 24.3 Fase stabile: il grafico viene aggiornato quasi continuamente
+
+Dalla quinta riga in poi compare un regime molto regolare:
+
+```text
+calls=33 req≈24.4MB reqMBps≈23.8MB/s updateMs≈208–220ms effMBps≈112–117MB/s maxRectPx=485051
+```
+
+Questo significa che, durante il trascinamento del grafico, il sistema aggiorna la texture circa:
+
+```text
+33 volte al secondo
+```
+
+Questo valore è vicino a un refresh grafico di circa 30 Hz. Quindi durante il drag il grafico si comporta come una vera animazione continua: a ogni intervallo viene ridisegnata e caricata una porzione ampia dello schermo.
+
+Il dato più pesante è `updateMs`:
+
+```text
+updateMs ≈ 210 ms/s
+```
+
+cioè:
+
+```text
+210 ms / 1000 ms ≈ 21% di un core equivalente
+```
+
+speso soltanto dentro `SDL_UpdateTexture()`.
+
+Per un sistema real-time questo è un carico importante, perché non pesa solo sulla CPU. Durante questi upload vengono coinvolti anche:
+
+```text
+- cache L1/L2
+- write-back delle cache line modificate
+- bus/interconnect interno al SoC
+- memoria DDR
+- driver grafico / pipeline SDL
+```
+
+---
+
+### 24.4 Significato di `maxRectPx=485051`
+
+Assumendo una risoluzione di:
+
+```text
+960 × 640 = 614400 pixel
+```
+
+il valore:
+
+```text
+maxRectPx = 485051
+```
+
+corrisponde a:
+
+```text
+485051 / 614400 ≈ 0.789
+```
+
+quindi circa:
+
+```text
+79% dello schermo
+```
+
+Questo significa che durante il trascinamento del grafico almeno una dirty region per secondo arriva a coprire quasi l’80% dello schermo.
+
+A 16 bpp, quindi 2 byte per pixel:
+
+```text
+485051 × 2 = 970102 byte ≈ 0.93 MiB
+```
+
+Quindi una singola dirty region grande può richiedere quasi 1 MiB di upload.
+
+Il fatto che `maxRectPx` resti fisso a 485051 per molti secondi suggerisce che probabilmente PEG stia invalidando sempre la stessa grande area, cioè verosimilmente l’area del grafico o del pannello che lo contiene.
+
+---
+
+### 24.5 Perché `effMBps` è alto nella fase pesante
+
+Durante la fase stabile del trascinamento si osservano valori come:
+
+```text
+effMBps = 114–117 MB/s
+```
+
+Questo può sembrare positivo, ma non deve essere interpretato come “il sistema sta andando meglio”.
+
+Significa solo che, quando il sistema copia blocchi grandi, la copia è più efficiente per byte.
+
+Confronto:
+
+```text
+molti upload piccoli:
+  reqMBps basso
+  updateMs alto
+  effMBps basso
+  overhead dominante
+
+upload grandi e continui:
+  reqMBps alto
+  updateMs molto alto
+  effMBps alto
+  banda e tempo totale dominanti
+```
+
+Quindi `effMBps` alto indica che la copia è efficiente mentre avviene, ma il sistema sta comunque copiando molti più dati e sta spendendo molto più tempo complessivo.
+
+Per il real-time la metrica più critica resta:
+
+```text
+updateMs
+```
+
+seguita da:
+
+```text
+reqMBps
+maxRectPx
+calls
+```
+
+---
+
+### 24.6 Confronto tra riposo, touch generico e drag del grafico
+
+| Scenario | calls/s | reqMBps | updateMs/s | maxRectPx | Interpretazione |
+|---|---:|---:|---:|---:|---|
+| Riposo / attività leggera | 7–9 | ~0.75–1 MB/s | ~22–30 ms | ~66k px | redraw periodico leggero |
+| Pressione / touch generico | 14–20 | ~5–8 MB/s | ~60–97 ms | fino a 614400 px | interazione pesante con dirty region anche full-screen |
+| Inizio drag grafico | 39–48 | ~1.7–4 MB/s | ~129–140 ms | ~290k–375k px | moltissime chiamate, overhead alto |
+| Drag grafico stabile | ~33 | ~23.7–24.1 MB/s | ~208–220 ms | 485051 px | scenario critico: upload grandi e continui |
+
+Il trascinamento del grafico è quindi lo scenario più pesante tra quelli misurati finora.
+
+Anche se `maxRectPx=485051` è inferiore al full-screen `614400`, l’aggiornamento è molto più continuo e sostenuto. Per questo `reqMBps` arriva a circa 24 MB/s e `updateMs` supera i 200 ms/s.
+
+---
+
+### 24.7 Interpretazione tecnica del drag grafico
+
+Il comportamento osservato è coerente con questa catena:
+
+```text
+touch drag sul grafico
+    ↓
+tanti eventi motion
+    ↓
+PEG aggiorna posizione/scala/offset del grafico
+    ↓
+il widget grafico viene invalidato
+    ↓
+PEG ridisegna una grande area
+    ↓
+uploadDirtyRegion() copia il rettangolo dirty verso la texture SDL
+    ↓
+SDL_UpdateTexture() consuma tempo e muove dati
+    ↓
+aumentano traffico cache/bus/DDR e potenziale interferenza RT
+```
+
+In altre parole, il problema non è necessariamente un bug. È un caso d’uso graficamente pesante: muovere un grafico tramite touch richiede aggiornamenti continui e ampi.
+
+Tuttavia, dal punto di vista real-time è uno scenario critico perché concentra tre fattori:
+
+```text
+1. frequenza alta di upload
+2. dirty region molto grande
+3. tempo elevato dentro SDL_UpdateTexture()
+```
+
+---
+
+### 24.8 Come valutare questi dati
+
+La valutazione sintetica è:
+
+```text
+scenario: drag/movimento grafico tramite touch
+carico: pesante ma coerente
+criticità RT: alta
+causa probabile: ridisegno continuo di una grande area grafica
+metrica più grave: updateMs ≈ 210 ms/s
+metrica di banda: reqMBps ≈ 24 MB/s
+area aggiornata: fino a circa 79% dello schermo
+```
+
+Quindi questi dati non indicano semplicemente “troppe calls”. Indicano:
+
+```text
+calls abbastanza alte + rettangoli grandi + tempo di upload molto alto
+```
+
+Questa combinazione può spiegare bene gli aumenti osservati con `perf` sui contatori:
+
+```text
+mem_access
+l2d_cache_wb
+bus_access
+imx8_ddr0/write-accesses
+```
+
+---
+
+### 24.9 Implicazioni per le ottimizzazioni
+
+Per questo scenario, le ottimizzazioni più promettenti sono:
+
+#### 1. Limitare il refresh del grafico durante il drag
+
+Non è detto che ogni evento touch debba produrre un redraw completo.
+
+Si può valutare un limite, ad esempio:
+
+```text
+massimo 20–30 redraw/s durante il drag
+```
+
+Se arrivano più eventi touch, si può usare solo l’ultimo evento disponibile prima del prossimo frame.
+
+---
+
+#### 2. Coalescing degli eventi motion
+
+Durante un drag possono arrivare molti eventi `SDL_FINGERMOTION` o `SDL_MOUSEMOTION`.
+
+Invece di processarli tutti graficamente, si può fare:
+
+```text
+accumula eventi motion
+prima del redraw usa solo l’ultimo
+```
+
+Questo può ridurre:
+
+```text
+calls
+redraw PEG
+uploadDirtyRegion
+updateMs
+```
+
+---
+
+#### 3. Separare parte statica e parte dinamica del grafico
+
+Se il grafico contiene assi, griglia, label e sfondo, non sempre ha senso ridisegnare tutto a ogni movimento.
+
+Idealmente:
+
+```text
+parte statica:
+  assi
+  griglia
+  sfondo
+  label fisse
+
+parte dinamica:
+  curva
+  cursore
+  finestra visibile
+  punto selezionato
+```
+
+Se si riesce a mantenere cache della parte statica, il drag potrebbe richiedere meno lavoro.
+
+---
+
+#### 4. Verificare se il widget grafico invalida tutta la sua area
+
+Il valore `maxRectPx=485051` stabile suggerisce che l’intero widget grafico o quasi tutto il suo contenitore venga invalidato a ogni aggiornamento.
+
+Per confermarlo, conviene loggare anche:
+
+```text
+rect.x
+rect.y
+rect.w
+rect.h
+```
+
+soprattutto quando:
+
+```text
+area > 300000 px
+```
+
+Così si può capire se il rettangolo coincide sempre con la stessa zona del grafico.
+
+---
+
+#### 5. Valutare una modalità RT-safe durante il drag
+
+Se l’interazione con il grafico non è critica quanto il ciclo real-time, si può valutare una modalità in cui, mentre i task RT sono attivi, il grafico viene aggiornato a frequenza ridotta.
+
+Esempio:
+
+```text
+modalità normale:
+  redraw grafico fino a 30 Hz
+
+modalità RT-safe:
+  redraw grafico limitato a 10–15 Hz
+  oppure aggiornamento differito quando il sistema è meno carico
+```
+
+Questo non elimina la GUI, ma evita che un drag grafico occupi oltre 200 ms/s in upload texture.
+
+---
+
+
+## 25. Scenario D: popup di avviso piccolo dopo pressione del bottone
+
+È stato analizzato anche un caso diverso dal cambio completo di schermata e dal trascinamento del grafico: la pressione di un bottone che fa comparire una **piccola finestra di avviso** sopra l'interfaccia esistente.
+
+Il caso è importante perché, visivamente, la schermata cambia poco: l'interfaccia principale resta quasi uguale e compare soltanto un popup centrale con un messaggio e un pulsante `Ok`. Questo permette di distinguere tra:
+
+```text
+aggiornamento grande giustificato:
+  cambio schermata completo
+
+aggiornamento grande sospetto:
+  piccola modifica visiva, ma dirty region molto ampia
+```
+
+---
+
+### 25.1 Log osservati
+
+Esempi di righe raccolte durante la comparsa del popup:
+
+```text
+[RT] uploadDirtyRegion: calls=7 req=2.01MB reqMBps=1.99 updateMs=29.084 effMBps=69.2 maxRectPx=370688
+[RT] uploadDirtyRegion: calls=6 req=2.03MB reqMBps=2.02 updateMs=26.080 effMBps=77.7 maxRectPx=370688
+[RT] uploadDirtyRegion: calls=8 req=3.19MB reqMBps=3.16 updateMs=37.039 effMBps=86.2 maxRectPx=370688
+[RT] uploadDirtyRegion: calls=5 req=0.68MB reqMBps=0.67 updateMs=17.154 effMBps=39.4 maxRectPx=227632
+```
+
+Valori riassuntivi:
+
+| Metrica | Valore tipico osservato | Interpretazione |
+|---|---:|---|
+| `calls` | 4–8/s | frequenza di upload contenuta |
+| `reqMBps` | circa 0.67–3.16 MB/s | traffico moderato |
+| `updateMs` | circa 16–37 ms/s | costo non nullo, ma molto inferiore al drag del grafico |
+| `maxRectPx` | fino a 370688 px | area dirty molto ampia rispetto al popup visivo |
+
+Quindi questo scenario non è pesante come il trascinamento del grafico, ma è più interessante dal punto di vista dell'efficienza delle dirty region.
+
+---
+
+### 25.2 Perché `maxRectPx=370688` è sospetto
+
+Assumendo risoluzione:
+
+```text
+960 × 640 = 614400 pixel
+```
+
+il valore:
+
+```text
+maxRectPx = 370688 pixel
+```
+
+corrisponde a:
+
+```text
+370688 / 614400 ≈ 0.603
+```
+
+cioè circa il **60% dello schermo**.
+
+A 16 bpp, quindi 2 byte per pixel:
+
+```text
+370688 × 2 = 741376 byte ≈ 0.71 MiB
+```
+
+Quindi una singola dirty region grande in questo scenario può richiedere circa **0.7 MiB** di upload verso la texture.
+
+Questo è sospetto perché il popup visibile è molto più piccolo del 60% dello schermo. A occhio, la finestra di avviso occupa soltanto una porzione centrale della schermata. L'interfaccia sotto resta quasi invariata.
+
+---
+
+### 25.3 Differenza rispetto al cambio completo di schermata
+
+Quando un bottone cambia completamente interfaccia o pagina, una dirty region grande è normale:
+
+```text
+pressione bottone
+    ↓
+cambio schermata
+    ↓
+gran parte dello schermo cambia
+    ↓
+maxRectPx grande giustificato
+```
+
+Nel caso del popup di avviso, invece, non cambia tutta l'interfaccia. Compare soltanto una piccola finestra sopra la schermata esistente.
+
+Quindi la lettura corretta è:
+
+```text
+maxRectPx grande durante cambio pagina:
+  atteso
+
+maxRectPx grande durante popup piccolo:
+  potenzialmente inefficiente
+```
+
+---
+
+### 25.4 Spiegazione più probabile: bounding box unico troppo ampio
+
+La spiegazione più probabile è che il sistema non stia copiando solo la zona del popup, ma stia unendo più zone modificate distanti in un unico rettangolo dirty.
+
+Esempio possibile:
+
+```text
+1. il bottone Insert viene premuto e cambia stato
+2. compare il popup al centro
+3. il pulsante Ok o la barra del popup vengono disegnati
+4. forse qualche widget sotto viene invalidato
+5. le regioni dirty vengono unite in un solo bounding box
+```
+
+Se il bottone premuto è in basso a destra e il popup è al centro, il rettangolo che contiene entrambe le zone può diventare molto più grande delle aree realmente modificate.
+
+Schema semplificato:
+
+```text
++--------------------------------------------------+
+|                                                  |
+|                  popup                           |
+|              +-----------+                       |
+|              |  warning  |                       |
+|              +-----------+                       |
+|                                                  |
+|                                                  |
+|                                      Insert      |
++--------------------------------------------------+
+```
+
+Se si usa un solo bounding box, l'area copiata può includere anche molto spazio non modificato tra popup e bottone.
+
+Quindi il problema non è necessariamente che PEG ridisegni davvero il 60% dello schermo. Potrebbe essere che la rappresentazione finale della dirty region venga **gonfiata** dall'unione di rettangoli distanti.
+
+---
+
+### 25.5 Interpretazione delle metriche in questo scenario
+
+Nel caso del popup, i valori vanno letti così:
+
+```text
+calls basse/moderate:
+  non ci sono troppi upload al secondo
+
+reqMBps moderato:
+  il traffico non è enorme
+
+updateMs moderato:
+  il costo è misurabile ma non critico quanto il grafico
+
+maxRectPx alto:
+  la zona copiata è probabilmente troppo grande rispetto alla modifica visiva
+```
+
+Quindi il collo di bottiglia non è la frequenza di aggiornamento, ma l'ampiezza della regione aggiornata.
+
+In sintesi:
+
+```text
+non è un caso critico per banda continua,
+ma è un caso sospetto per inefficienza della dirty region.
+```
+
+---
+
+### 25.6 Confronto con gli altri scenari
+
+| Scenario | `calls` | `reqMBps` | `updateMs` | `maxRectPx` | Giudizio |
+|---|---:|---:|---:|---:|---|
+| Riposo / attività leggera | 7–9/s | ~0.75–1 MB/s | ~22–30 ms/s | ~66912 px | baseline non nulla |
+| Popup piccolo | 4–8/s | ~0.67–3.16 MB/s | ~16–37 ms/s | fino a 370688 px | non pesante, ma dirty region sospetta |
+| Cambio schermata completo | variabile | può salire | può salire | può arrivare a full-screen | giustificato se cambia tutta la pagina |
+| Touch generico / cambio pagina | 14–20/s | ~5–8 MB/s | ~60–97 ms/s | fino a 614400 px | pesante se ripetuto, normale se transitorio |
+| Drag grafico stabile | ~33/s | ~24 MB/s | ~208–220 ms/s | 485051 px | scenario critico continuo |
+
+Questa tabella evidenzia una distinzione importante:
+
+```text
+popup piccolo:
+  carico moderato, ma area dirty sproporzionata
+
+drag grafico:
+  carico elevato e sostenuto nel tempo
+
+cambio schermata:
+  dirty region grande giustificata se l'interfaccia cambia davvero
+```
+
+---
+
+### 25.7 Prossima misura consigliata per confermare l'ipotesi
+
+Per capire se il problema è davvero il bounding box unico, non basta più stampare solo `maxRectPx`. Conviene loggare anche le coordinate del rettangolo massimo:
+
+```text
+maxRectX
+maxRectY
+maxRectW
+maxRectH
+maxRectPx
+```
+
+Un log utile sarebbe, per esempio:
+
+```text
+[RT] maxRect x=420 y=300 w=610 h=608 area=370688
+```
+
+oppure:
+
+```text
+[RT] maxRect x=430 y=260 w=390 h=160 area=62400
+```
+
+Nel primo caso il rettangolo è enorme e probabilmente contiene sia popup sia bottone o altre aree distanti.
+
+Nel secondo caso il rettangolo coincide più o meno con il popup, quindi la dirty region sarebbe coerente con la modifica visiva.
+
+Questa misura permetterebbe di distinguere tra:
+
+```text
+invalidazione realmente ampia:
+  PEG ridisegna un grande contenitore
+
+bounding box gonfiato:
+  più regioni piccole e distanti vengono unite
+```
+
+---
+
+### 25.8 Conclusione sul popup
+
+Il popup di avviso rappresenta uno scenario intermedio. Non genera un carico sostenuto paragonabile al trascinamento del grafico, ma mostra un comportamento potenzialmente inefficiente: la dirty region massima raggiunge circa il 60% dello schermo, nonostante la modifica visiva sembri limitata a una finestra di avviso centrale.
+
+La spiegazione più probabile è l'aggregazione di più regioni dirty distanti in un unico bounding box, oppure l'invalidazione di un contenitore più grande del necessario.
+
+Una conclusione sintetica può essere:
+
+> Nel caso della finestra di avviso, il numero di upload e la banda richiesta restano moderati, ma la dirty region massima raggiunge circa il 60% dello schermo. Poiché visivamente compare soltanto un piccolo popup, questo suggerisce che l'area effettivamente caricata verso la texture sia più ampia dell'area realmente modificata, probabilmente a causa del merge delle dirty region o dell'invalidazione di un contenitore più grande.
+
+---
+
+## 26. Aggiornamento della conclusione tecnica
+
+I dati raccolti mostrano diversi livelli di carico della GUI.
+
+A riposo, l’interfaccia produce comunque aggiornamenti periodici della texture, con circa 7–9 upload al secondo, circa 0.75–1 MB/s di dati copiati e circa 22–30 ms/s spesi in `SDL_UpdateTexture()`.
+
+Nel caso del popup di avviso, il carico resta moderato in termini di frequenza e banda, con circa 4–8 upload al secondo, circa 0.67–3.16 MB/s e circa 16–37 ms/s spesi in `SDL_UpdateTexture()`. Tuttavia, la dirty region massima arriva fino a circa 370688 pixel, cioè circa il 60% dello schermo assumendo una risoluzione 960×640. Questo valore è elevato rispetto alla modifica visiva reale, che consiste principalmente nella comparsa di una piccola finestra di avviso.
+
+Durante una normale interazione touch o un cambio di schermata, il carico può aumentare: gli upload salgono spesso a 14–20 al secondo, il volume copiato arriva a circa 5–8 MB/s e il tempo speso in `SDL_UpdateTexture()` raggiunge circa 60–97 ms/s. In caso di cambio completo dell’interfaccia, una dirty region prossima al full-screen può essere giustificata perché gran parte della schermata cambia davvero.
+
+Il trascinamento di un grafico tramite touch rappresenta invece lo scenario più critico osservato. In fase stabile si misurano circa 33 upload al secondo, circa 24 MB/s copiati verso la texture e oltre 200 ms/s spesi in `SDL_UpdateTexture()`. Il valore `maxRectPx=485051` indica che la dirty region massima copre circa il 79% dello schermo.
+
+Questi risultati indicano che l’interferenza non è spiegata principalmente da una saturazione della memoria GPU, che resta stabile e contenuta, né da una saturazione CPU generica. Il comportamento più rilevante è l’aumento del traffico memoria/cache/bus generato dagli aggiornamenti grafici, in particolare quando vengono ridisegnate e caricate porzioni molto ampie dello schermo. L’analisi mostra anche che una dirty region grande non è sempre da interpretare allo stesso modo: può essere giustificata in un cambio pagina, ma sospetta quando la modifica visiva è limitata, come nel caso del popup.
+
+---
+
+## 27. Riassunto finale operativo
+
+Per valutare rapidamente un nuovo log, conviene leggere le metriche in questo ordine:
+
+```text
+1. updateMs
+   Quanto tempo viene speso dentro SDL_UpdateTexture?
+
+2. reqMBps
+   Quanti MB/s vengono richiesti alla pipeline grafica?
+
+3. maxRectPx
+   Quanto è grande la dirty region massima?
+
+4. calls
+   Quante volte al secondo si aggiorna la texture?
+
+5. effMBps
+   La copia è efficiente o dominata dall’overhead?
+```
+
+Nel caso del popup piccolo, il problema principale è:
+
+```text
+maxRectPx troppo grande rispetto alla modifica visiva
+```
+
+Quindi la misura più utile è stampare anche le coordinate del rettangolo massimo, per capire se la dirty region contiene sia popup sia bottone o altre aree distanti.
+
+Nel caso del grafico trascinato, il problema principale è:
+
+```text
+updateMs molto alto + reqMBps alto + dirty region molto grande
+```
+
+Quindi la direzione di ottimizzazione più promettente non è ridurre la memoria GPU allocata, ma:
+
+```text
+- ridurre la frequenza di redraw del grafico
+- coalescere gli eventi motion
+- ridurre l’area invalidata
+- evitare di ridisegnare parti statiche del grafico
+- limitare il refresh grafico in modalità RT-safe
+- distinguere gli update full-screen giustificati dai bounding box gonfiati
+```
+
