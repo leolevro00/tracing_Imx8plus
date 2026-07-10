@@ -121,6 +121,7 @@ strings libPegLib.so | grep '\[RT\]'
 | **5** | Diagnosi formato texture SDL (Opzione A) | ✅ Diagnosi mismatch RGB565 · nessun fix runtime | [→ TEST 5](#test-5) |
 | **5b** | Texture ARGB8888 nativa + conversione esplicita | ✅ GUI +150% · ❌ RT **191 µs** → **rollback** | [→ TEST 5b](#test-5b) |
 | **6** | DRM dumb buffer RGB565 (Opzione D POC) | ⚠️ GUI peggiore · RT 112 µs → **rollback** | [→ TEST 6](#test-6) |
+| **B** | `SDL_LockTexture` streaming (Opzione B) | ❌ ≈ Test 0 · **rollback** | [→ TEST B](#test-b) |
 | **DCC** | Framebuffer Compression / Prefetch (fase 0) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ TEST DCC](#test-dcc) |
 | **7** | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ TEST 7](#test-7) |
 
@@ -139,7 +140,6 @@ strings libPegLib.so | grep '\[RT\]'
 | Test | Descrizione | Stato |
 |------|-------------|-------|
 | **7** | Pixel clock display — abbassare timing LVDS | ⏸️ **Sospeso** — fase 0 OK; proseguimento solo con patch **BSP Yocto** ([TEST 7](#test-7)) |
-| B | `SDL_LockTexture` streaming (Opzione B) | ⬜ non eseguito |
 | C | Double buffering KMSDRM (già `SDL_VIDEO_DOUBLE_BUFFER=1`) | ⬜ nessun margine |
 
 ### Come leggere gli esiti (due assi indipendenti)
@@ -890,6 +890,108 @@ Se l'interfaccia **si avvia a metà e poi si blocca**:
 2. Riavviare la scheda se DRM è in stato sporco dopo un crash
 3. Controllare che `PegExec` e `libPegLib.so` siano della **stessa build**
 4. Il warning `XView/YView != XRes/YRes` è informativo su 1024×600 viewport — non dovrebbe da solo bloccare l'avvio, ma su embedded conviene allineare i valori
+
+---
+
+<a id="test-b"></a>
+
+## TEST B — `SDL_LockTexture` streaming (Opzione B)
+
+**Stato:** ❌ Misurato → **rollback** · **Macro:** `EMBEDDED_HMI_RT_STREAMING_LOCK` · **Branch:** `test/SDL_LockTexture` · [← Tabella](#stato-test)
+
+---
+
+> **Obiettivo:** sostituire `SDL_UpdateTexture()` con il path raccomandato da SDL per texture **STREAMING** aggiornate frequentemente: `SDL_LockTexture` → `memcpy` riga-per-riga → `SDL_UnlockTexture`.
+>
+> **Ipotesi SDL:** `UpdateTexture` può usare staging/copie extra; il lock scrive direttamente nel buffer mappato della texture.
+
+### Pipeline
+
+**Baseline (Test 0):**
+
+```text
+framebuffer PEG (RAM) → SDL_UpdateTexture() → SDL_Texture → SDL_RenderCopy() → SDL_RenderPresent()
+```
+
+**Test B (questa build):**
+
+```text
+framebuffer PEG (RAM) → SDL_LockTexture() → memcpy → SDL_UnlockTexture() → SDL_RenderCopy() → SDL_RenderPresent()
+```
+
+La texture resta `SDL_TEXTUREACCESS_STREAMING` (già così in Test 0); cambia solo il modo di caricare i pixel dirty.
+
+### Modifica codice
+
+| File | Cosa |
+|------|------|
+| `PegLib/PegLib.pro` | `DEFINES += EMBEDDED_HMI_RT_STREAMING_LOCK` |
+| `PegLib/peglvglwindow.cpp` | `rtUploadViaStreamingLock()` in `uploadDirtyRegion()` |
+
+**Verifica deploy:**
+
+```bash
+strings libPegLib.so | grep 'SDL_LockTexture path'
+# oppure all'avvio PegExec su stderr:
+# [RT] upload path: SDL_LockTexture + memcpy (streaming, Test B)
+```
+
+**Rollback:** commentare `EMBEDDED_HMI_RT_STREAMING_LOCK` in `PegLib.pro`, rebuild.
+
+### Protocollo misura
+
+Stesso di [TEST 0](#test-0):
+
+1. Deploy `libPegLib.so` + `PegExec`
+2. Avvio PegExec → attendere **≥ 30 s** → Lnk / PerfMonitor
+3. Scenari: **idle** (no touch) e **scroll/drag grafico**
+4. Confrontare `[RT] uploadDirtyRegion` (`reqMBps`, `updateMs`, `effMBps`) e `rtc_handler_us` / `nanosleep` max vs baseline Test 0
+
+### Attese / rischi
+
+| Aspetto | Nota |
+|---------|------|
+| GUI `effMBps` / `updateMs` | Possibile miglioramento se SDL evita staging interno |
+| RT | Da misurare — beneficio non garantito |
+| Formato RGB565 su GLES2 | [TEST 5](#test-5) suggeriva che il mismatch formato potrebbe limitare il guadagno (conversione altrove nella pipeline) |
+| `lockedPitch` | Può differire dal pitch PEG → copia **riga per riga** (già implementata) |
+
+### Esito (2026-07-10, target avn8mp)
+
+**Config:** `rtos.ini` produzione 1024×768 / viewport 1024×600 (`maxRectPx=485051` in scroll). Deploy verificato: `[RT] upload path: SDL_LockTexture + memcpy (streaming, Test B)`.
+
+#### GUI — scroll grafico (`calls≈33`, stesso scenario Test 0)
+
+| Metrica | Test 0 baseline | Test B (LockTexture) | Δ |
+|---------|----------------:|---------------------:|---|
+| `reqMBps` | ~24,1 | ~23,4–23,8 | ≈ uguale |
+| `updateMs/s` | ~208–216 | ~209–241 | ≈ uguale (leggermente peggio) |
+| `effMBps` | ~114–117 | ~101–106 | **≈ −10%** |
+| `maxRectPx` | 485051 | 485051 | uguale |
+
+Esempi log Test B:
+
+```text
+[RT] uploadDirtyRegion: calls=33 req=24.37MB reqMBps=23.77 updateMs=229.267 effMBps=106.3 maxRectPx=485051
+[RT] uploadDirtyRegion: calls=33 req=24.74MB reqMBps=24.09 updateMs=241.xxx effMBps=101.1 maxRectPx=485051
+```
+
+#### RT — worst case scroll (CPU3)
+
+| Metrica | Test 0 | Test B |
+|---------|-------:|-------:|
+| `rtc_handler_us` max | 122 µs | **120 µs** |
+| `L2 cache miss` | — | 17,1% |
+
+RT entro rumore di misura (±2 µs), **nessun beneficio reale**.
+
+#### Conclusione
+
+> **Confermato empiricamente:** su i.MX8MP + SDL/KMSDRM + GLES2, `SDL_LockTexture` **non migliora** rispetto a `SDL_UpdateTexture` — GUI uguale o leggermente peggiore (`effMBps` −10%), RT invariato. Coerente con [TEST 5](#test-5): il collo di bottiglia non è lo staging di `UpdateTexture` ma il path formato/conversione RGB565→GLES e il resto della pipeline.
+>
+> **Rollback:** commentare `EMBEDDED_HMI_RT_STREAMING_LOCK`, tornare a `test0-baseline` / Test 0.
+
+`ERROR: Could not restore CRTC` all'avvio/uscita: noto su teardown SDL/KMSDRM, **non** causato da Test B (vedi nota in [TEST 6](#test-6)).
 
 ---
 
