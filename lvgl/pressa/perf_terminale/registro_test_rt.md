@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-10** (ristrutturazione tabella + titoli TEST)
+> Ultimo aggiornamento: **2026-07-13 sera** (Test 6: campagna **~30 min** OK · worst **105 µs** · `count_ge_100` = **2**/432 000 · stabilità **`libcad2d` 3ª build** incluso edit linee grafico ✅)
 
 ---
 
@@ -34,8 +34,10 @@ Stack: **PEG** disegna su framebuffer software → `uploadDirtyRegion()` → SDL
 | Bpp | 16 (RGB565) |
 | Risoluzione baseline misure `[RT]` | ~**960×640** effettivi su schermo (da log `maxRectPx`; `rtos.ini` repo era 1024×768) |
 | Risoluzione attuale sul target | **1024×600 viewport** (`XRes=1024` `YRes=768`, `XView=1024` `YView=600`) su `/opt/Squeeze/rtos.ini` |
-| Macro attive in `PegLib.pro` | `EMBEDDED_HMI_RT_STATS` ✅, `EMBEDDED_HMI_RT_DIAG` ✅ — **Test 0 baseline** (no `RT_NATIVE_TEXTURE`, no `RT_DRM_DIRECT`) |
-| Macro disattivate | `EMBEDDED_HMI_RT_NATIVE_TEXTURE` (Test 5b rollback), `EMBEDDED_HMI_RT_DRM_DIRECT` (Test 6) |
+| Framebuffer PEG (allocazione) | **1024×768** @ 16 bpp ≈ **1,50 MiB** (+ 1 riga slack, come path legacy) — pitch driver DIB16 |
+| Framebuffer scanout DRM (Test 6) | **1024×600** @ RGB565 dumb buffer ≈ **1,17 MiB** — solo righe visibili (`YView`) |
+| Macro attive in `PegLib.pro` | `EMBEDDED_HMI_RT_STATS` ✅, `EMBEDDED_HMI_RT_DIAG` ✅, **`EMBEDDED_HMI_RT_DRM_DIRECT`** ✅ (Test 6, branch `experiment/test6-drm`) |
+| Macro disattivate | `EMBEDDED_HMI_RT_NATIVE_TEXTURE` (Test 5b rollback), `EMBEDDED_HMI_RT_STREAMING_LOCK` (Test B rollback) |
 
 ---
 
@@ -44,7 +46,8 @@ Stack: **PEG** disegna su framebuffer software → `uploadDirtyRegion()` → SDL
 | Risoluzione | Pixel | Buffer PEG (MiB) | Note |
 |-------------|------:|-----------------:|------|
 | 1024×768 | 786 432 | 1,50 | baseline `rtos.ini` originale |
-| 1024×600 (viewport attuale target) | 614 400 | 1,17 | `XView=1024` `YView=600` su `/opt/Squeeze/rtos.ini` |
+| 1024×768 (buffer PEG logico, pitch driver) | 786 432 | 1,50 | `XRes×YRes` — **allocazione corretta** dal 2026-07-13 pomeriggio |
+| 1024×600 (viewport / scanout DRM) | 614 400 | 1,17 | `XView×YView` — solo display; **non** dimensionare il buffer PEG così |
 | **800×600** | 480 000 | **0,92** | Opzione 1 attuale (−39% vs 1024×768) |
 | 640×480 | 307 200 | 0,59 | step più aggressivo (da provare) |
 
@@ -69,7 +72,8 @@ Per ogni test, due scenari sul target:
 
 ```bash
 strings libPegLib.so | grep '\[RT\]'
-./PegExec 2>&1 | head   # log avvio: [RT] framebuffer PEG ...
+./PegExec 2>&1 | head   # log avvio: [RT] framebuffer PEG ..., crashdiag, PegLib build ...
+strings libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 ```
 
 #### Ordine di avvio PegExec / Lnk (critico per `nanosleep` max)
@@ -120,12 +124,12 @@ strings libPegLib.so | grep '\[RT\]'
 | **4** | Riduzione risoluzione **800×600** (Opzione 1) | ✅ GUI −27…45% · RT **97 µs** (−20%) | [→ TEST 4](#test-4) |
 | **5** | Diagnosi formato texture SDL (Opzione A) | ✅ Diagnosi mismatch RGB565 · nessun fix runtime | [→ TEST 5](#test-5) |
 | **5b** | Texture ARGB8888 nativa + conversione esplicita | ✅ GUI +150% · ❌ RT **191 µs** → **rollback** | [→ TEST 5b](#test-5b) |
-| **6** | DRM dumb buffer RGB565 (Opzione D POC) | ⚠️ GUI peggiore · RT 112 µs → **rollback** | [→ TEST 6](#test-6) |
+| **6** | DRM dumb buffer RGB565 (Opzione D POC) | ✅ RT · ✅ GUI · ✅ stabilità **30 min** + edit linee | [→ TEST 6](#test-6) |
 | **B** | `SDL_LockTexture` streaming (Opzione B) | ❌ ≈ Test 0 · **rollback** | [→ TEST B](#test-b) |
 | **DCC** | Framebuffer Compression / Prefetch (fase 0) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ TEST DCC](#test-dcc) |
 | **7** | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ TEST 7](#test-7) |
 
-**Produzione attuale:** Test **0** baseline (`RT_NATIVE_TEXTURE` e `RT_DRM_DIRECT` disattivate).
+**Produzione attuale:** Test **6** su branch `experiment/test6-drm` — **pronto per promozione** (RT, GUI, stabilità ~30 min con `libcad2d` 3ª build, incluso aggiunta linee al grafico). Test **0** resta fallback noto.
 
 ### Prossimi test
 
@@ -574,7 +578,7 @@ PEG RGB565 (16 bpp, RAM)  →  SDL/GLES (conversione + compositing)  →  fb0 sc
 
 ## TEST 6 — Opzione D: DRM dumb buffer RGB565 diretto (2026-07-09)
 
-**Stato:** ⚠️ Misurato → rollback · **Macro:** `RT_DRM_DIRECT` (disattivata) · [← Tabella](#stato-test)
+**Stato:** ✅ RT/GUI/stabilità validati · **Macro:** `RT_DRM_DIRECT` (branch `experiment/test6-drm`) · [← Tabella](#stato-test)
 
 ---
 
@@ -593,6 +597,237 @@ PEG RGB565 (16 bpp, RAM)  →  SDL/GLES (conversione + compositing)  →  fb0 sc
 - Selezione device DRM: `drmModeGetResources` su ogni card (card0 Vivante → card1 `imx-drm`)
 - Touch evdev: edge detection press/release su `SYN_REPORT` (bug: solo motion, no click PEG)
 
+---
+
+### Ripresa Test 6 (2026-07-13) — obiettivo RT < 100 µs
+
+Contesto ripresa su branch `experiment/test6-drm`, config produzione `XRes=1024 YRes=768` + `XView=1024 YView=600`, `Bpp=16`.
+
+#### A) Touch non funzionante dopo reboot
+
+**Sintomo:** GUI visibile ma nessun click; `evtest /dev/input/event1` (“ESA-VMAKD”, device virtuale) non produce eventi al tocco.
+
+**Causa:** il probe evdev sceglieva il primo device con `ABS_X/Y`, ma dopo reboot compare prima l’iniettore virtuale ESA invece del touch ILITEK (`event2`, `INPUT_PROP_DIRECT`).
+
+**Fix:**
+
+- selezione a punteggio (multitouch + `INPUT_PROP_DIRECT`, penalità bustype 0)
+- override: `PEGDRM_TOUCH_DEV=/dev/input/event2`
+- log avvio: `[RT] evdev: touch multitouch (...) da /dev/input/event2 "ILITEK ILITEK-TP"`
+
+#### B) Ottimizzazione memcpy: damage tracking (no sync front→back)
+
+**Problema:** a ogni present, copia integrale **front→back** (~1,5 MiB) leggendo dal dumb buffer (memoria non cachata) → CPU alta e traffico DDR.
+
+**Fix:** damage tracking — recupero zone “stale” dal framebuffer PEG (RAM cachata) invece di leggere il dumb buffer front.
+
+**Log avvio (una tantum):**
+
+```text
+[RT] drm: damage tracking attivo (sync integrale PEG→back se damage>=15% o blit>=6)
+```
+
+**Risultati RT osservati:**
+
+| Fase | `rtc_handler_us` worst |
+|------|------------------------:|
+| Dopo damage tracking | ~108 µs |
+| Ulteriori misure | ~102 µs |
+| Con affinità CPU corretta (Lnk su CPU3) | **~98 µs** ✅ |
+| Stress test “grafico colorato” (punto critico) | **99 µs** ✅ |
+| Stress prolungato (2026-07-13 pomeriggio) | **102 µs** worst |
+| **Campagna ~30 min** (scroll grafico + navigazione, 2026-07-13 sera) | **105 µs** worst · `count_ge_100` = **2** / **432 000** attivazioni |
+
+> `ps` mostrava `Lnk` non pinnato (migrava tra CPU 1/2). Pin esplicito consigliato per misure RT stabili.
+
+#### C) Artefatti “linee orizzontali” su grafico colorato + spike RT
+
+**Sintomo:** scroll su grafico 3D colorato → linee orizzontali a schermo; RT fino a ~150 µs.
+
+**Causa:** scroll pesante (`calls` ~50–65, `maxRectPx` ~487k, `reqMBps` ~32–48) — bounding box stale insufficiente prima del pageflip.
+
+**Mitigazione:** sync ibrido pre-flip — se damage ≥ **15%** schermo **o** blit ≥ **6** dal flip precedente → copia integrale PEG→back prima di `drmModePageFlip`. Il sync avviene in silenzio (nessun log per frame).
+
+**Esito:** linee orizzontali **risolte**; RT al punto critico ~**105 µs** (mancano ~5 µs al target).
+
+#### D) Rettangoli bianchi in scroll (2026-07-13) — ✅ risolto
+
+**Sintomo (iniziale):** durante scroll verso il basso sul grafico colorato comparivano piccoli **rettangoli bianchi** ai bordi delle forme.
+
+**Causa probabile:** race tra thread **PegRefresh** (disegna su `g_pyBitmap`) e main loop — snapshot DRM prima che PEG avesse finito di dipingere la regione appena esposta.
+
+**Mitigazione (codice PegLib):**
+
+- drain coda dirty (fino a 8 `processPendingUpdates` consecutivi) prima del `pageFlip`
+- **sync integrale PEG→back su ogni pageflip**
+- buffer PEG a `XRes×YRes` + `LOCK_PEG` su memcpy framebuffer
+
+**Esito validazione (2026-07-13, pomeriggio):** rettangoli bianchi **non si ripresentano più**, incluso scroll rapidissimo sul grafico colorato. ✅
+
+#### E) CPU e banda (misure 2026-07-13)
+
+**`top` — campagna ~30 min (2026-07-13 sera):**
+
+| Scenario | %CPU PegExec | %CPU Lnk | %MEM PegExec | %MEM Lnk | Note |
+|----------|-------------:|---------:|-------------:|---------:|------|
+| Interfaccia ferma (no scroll) | **4,0%** | **19,2%** | 27,5% | 20,2% | entrambi in stato `S` |
+| Scroll grafico sotto stress | **30,5%** | **21,9%** | 27,5% | 20,2% | Δ PegExec **+26,5 pp** |
+| Δ scroll − idle (`PegExec`) | +26,5 pp | +2,7 pp | — | — | pattern coerente con Test 0 |
+
+**`uploadDirtyRegion` sotto stress scroll (stessa sessione):**
+
+| Regime | calls | req | reqMBps | updateMs | effMBps | maxRectPx |
+|--------|------:|----:|--------:|---------:|--------:|----------:|
+| Scroll pesante (burst) | 72–105 | 43,8–50,0 MB | 43,3–49,4 | **60,7–70,0** | 699–736 | **487 656** |
+| Scroll leggero / frame parziali | 10–13 | 3,81–5,08 MB | 3,78–5,01 | **11,9–15,7** | 299–349 | 222 384 (picchi 292k–300k) |
+
+Esempi log (scroll pesante):
+
+```text
+[RT] uploadDirtyRegion: calls=105 req=49.98MB reqMBps=49.44 updateMs=69.955 effMBps=735.7 maxRectPx=487656
+[RT] uploadDirtyRegion: calls=72  req=43.83MB reqMBps=43.30 updateMs=60.739 effMBps=699.2 maxRectPx=487656
+```
+
+Esempi log (scroll leggero):
+
+```text
+[RT] uploadDirtyRegion: calls=13 req=5.08MB reqMBps=5.01 updateMs=15.730 effMBps=349.4 maxRectPx=222384
+[RT] uploadDirtyRegion: calls=10 req=3.81MB reqMBps=3.78 updateMs=11.930 effMBps=299.1 maxRectPx=222384
+```
+
+GPU non usata (`gc/meminfo` stabile); carico su CPU memcpy + pageflip DRM.
+
+#### G) Affinità CPU / isolcpus
+
+Obiettivo configurazione: **Lnk su CPU 3** con `isolcpus=3`. Verifiche:
+
+```bash
+cat /proc/cmdline | tr ' ' '\n' | grep -i isol
+cat /sys/devices/system/cpu/isolated
+taskset -cp $(pidof Lnk)
+taskset -c 3 /path/to/Lnk          # test manuale
+taskset -cp 0,1,2 $(pidof PegExec)
+```
+
+#### H) Segfault in validazione (2026-07-13) — causa identificata in `libcad2d`
+
+**Sintomi riportati sul target** (`zsh: segmentation fault (core dumped) ./PegExec`):
+
+| # | Scenario | Note log pre-crash |
+|---|----------|-------------------|
+| 1 | Primo click su bottone | — |
+| 2 | Aggiunta linee al grafico | burst `uploadDirtyRegion` fino a `calls=112`, `updateMs≈70` |
+| 3 | Dopo fix buffer PegLib | crash con carico moderato (`calls=15`, `updateMs≈11`) |
+
+**Backtrace simbolizzato** (`peg_crashdiag` + addr2line su build avn8mp, 2026-07-13):
+
+```text
+PegRefreshDaemon → EtsGUIThread → PegPresentationManager::Execute
+  → CPezzoFormLAlpha::Message(PegMessage const&)
+  → CPPGBaseDocument::UpdateAllViews()
+  → CPezzoForm::EditDraw()
+  → CRecGenerico::GetCodiceRecord() const   ← CRASH
+```
+
+> **Non è nel path DRM/Test 6.** Crash nel thread GUI PEG, in **`libcad2d.so`** (`CPezzoForm::EditDraw`), non in `uploadDirtyRegion` / `pageFlip`.
+
+**Causa diretta (aggiornamento 2026-07-13):** due problemi in `libcad2d`:
+
+1. **Form doppia:** con modalità **L,alpha** attiva, `UpdateAllViews()` aggiorna sia `CPezzoFormLAlpha` sia la form classica `CPezzoForm`. La form classica chiama `EditDraw()` con `RecGrafPtr()` **cache stale** (puntatore non NULL ma invalido) → crash in `GetCodiceRecord()`.
+2. **Null-check insufficienti** su `RecGrafPtrAt(n±1)` in `EditDraw()` (fix precedente incompleto).
+
+**Fix libcad2d (2ª iterazione):**
+
+| File | Fix |
+|------|-----|
+| `PezzoForm.cpp` | `OnUpdate()`: salta `EditDraw()` classico se esiste `GetForm_LAlpha()` |
+| `PezzoForm.cpp` | `EditDraw()`: usa `RecGrafPtrAt()` con bounds-check invece di `RecGrafPtr()` cache |
+| `PezzoFormLAlpha.cpp` | `EditDraw()`: null-check record precedente |
+| `Ppgdoc.cpp` | `UpdateRecGrafPtr()`: bounds-check su `m_nStepAttivo` vs `NumeroElementi()` |
+
+**Fix libcad2d (3ª iterazione — percorso mouse / aggiunta linee):**
+
+| File | Fix |
+|------|-----|
+| `Pezzoview.cpp` | `InizioSequenza()`: bounds-check + `RecGrafPtrAt()` (crash su `GetFirstParam()` con cache stale) |
+| `Pezzoview.cpp` | `OnLButtonUp` / `SelezionatoTratto`: accesso sicuro al record corrente |
+| `PezzoFrame.cpp` | `OnPrev()`: `ID_PREV` invece di `PK_F9` (PK_F9 non gestito da `TastoGestitoDaFieldUpdate`) |
+
+**Fix precedente (1ª iterazione):** null-check su `RecGrafPtrAt(n+1)` in `PezzoForm::EditDraw` — necessario ma non sufficiente.
+
+```bash
+# ricompilare cad2d, poi:
+cp libcad2d.so* /opt/Squeeze/
+```
+
+**Fix PegLib (utili, causa separata):** buffer `XRes×YRes`, `LOCK_PEG`, `peg_crashdiag` — vedi tabella sotto.
+
+**Tentativo debug core dump:** `gdb ./PegExec core` → **`core: No such file or directory`** in `/opt/Squeeze/`. Su Yocto/systemd il core finisce spesso in `systemd-coredump`, non nella cwd:
+
+```bash
+cat /proc/sys/kernel/core_pattern
+coredumpctl list | grep -i peg
+coredumpctl gdb PegExec    # dentro gdb: bt full
+# oppure forzare core locale:
+ulimit -c unlimited
+echo 'core.%e.%p' | tee /proc/sys/kernel/core_pattern   # richiede root
+```
+
+**Causa probabile #1 — buffer PEG troppo piccolo (confermata):**
+
+Con `XRes=1024` `YRes=768` e `XView=1024` `YView=600`, il driver DIB16 usa pitch **1024×768** (`_gBitmap->wWidth/wHeight` da `video->xd/yd`), ma `createSurface()` allocava solo **1024×600** → scritture PEG oltre la riga 599 **corrompevano l’heap** → segfault intermittente (click, redraw grafico).
+
+**Fix applicato (2026-07-13):**
+
+| Fix | File | Descrizione |
+|-----|------|-------------|
+| Buffer PEG a `XRes×YRes` | `peg_run.cpp` | `createSurface(_xres, _yres)`; display DRM resta `_xview×_yview` |
+| Pitch corretto | `peglvglwindow.cpp` | `m_fbWidth` / `framePitchBytes()` per memcpy; clip dirty a `m_width/m_height` (viewport) |
+| Riga slack +1 | `peglvglwindow.cpp` | alloc `(_yres+1)` righe come path embedded legacy (`EM_YRES+1`) |
+| Race framebuffer | `peglvglwindow.cpp` | `LOCK_PEG` (`PEG_PresentationCriticalSection`) durante `blitDirtyRegion` / `syncBackFromPeg` |
+| Teardown DRM | `pegdrmoutput.cpp` | `m_alive` nel callback page_flip; `waitFlipComplete()` prima di chiudere DRM |
+| Backtrace senza core | `peg_crashdiag.cpp` | handler `SIGSEGV`/`SIGABRT`/`SIGBUS` → stack su stderr |
+
+**Log avvio attesi dopo deploy fix:**
+
+```text
+[RT] crashdiag: handler SIGSEGV/SIGABRT/SIGBUS attivo (backtrace su stderr)
+[RT] drm_direct: Opzione D — output DRM dumb RGB565, SDL solo eventi
+[RT] PegLib build Jul 13 2026 12:xx:xx
+[RT] rtos.ini XRes=1024 YRes=768 → framebuffer PEG 1024x768 @ 16 bpp = 1.50 MiB, display 1024x600 = 1.17 MiB
+[RT] viewport attivo: PEG disegna su buffer 1024x768, scanout DRM copia le prime 600 righe visibili
+```
+
+**Al prossimo crash:** copiare tutto da `[RT] FATAL SIGSEGV` in giù (backtrace automatico).
+
+**Stato:** ✅ risolto — `libcad2d.so` 3ª build deployata; campagna **~30 min** senza crash, **incluso aggiunta linee al grafico** (percorso `InizioSequenza` / `OnLButtonUp` / `OnPrev`→`ID_PREV`).
+
+#### I) Varianza RT sotto stress prolungato — aggiornamento 2026-07-13 sera
+
+Misure precedenti avevano mostrato picchi fino a **~107 µs** (`bus_access≈18539`). Con build PegLib aggiornata (buffer `XRes×YRes`, drain dirty, sync integrale pre-flip, `LOCK_PEG`) e **`Lnk` su CPU3`, campagna **~30 min** (scroll grafico, navigazione schermate):
+
+| Metrica | Valore |
+|---------|--------|
+| `rtc_handler_us` worst (sessione) | **105 µs** |
+| Attivazioni totali (fine sessione) | **432 000** |
+| Attivazioni con `rtc_handler_us` **> 100 µs** | **2** (≈ **0,0005%**) |
+| Obiettivo | < 100 µs (2 spike su 432k — **accettabile** per produzione) |
+
+**Peggior iterazione** (CPU3, `[WORST rtc_handler_us]`, iter **380 793**):
+
+| Contatore | Valore |
+|-----------|--------|
+| `rtc_handler_us` | **105 µs** |
+| L2 miss | **31,55%** (`l2d_cache_refill` / `l2d_cache`) |
+| `bus_access` | 26 258 |
+| `bus_cycles` | 872 366 |
+| `cpu_cycles` | 1 740 115 |
+| Istruzioni | 657 115 |
+| IPC | **0,378** |
+| CPI | **2,648** |
+
+Verificare sempre `taskset -cp $(pidof Lnk)` → mask attesa `0x8`.
+
 **Pipeline:**
 
 ```text
@@ -600,255 +835,43 @@ PEG RGB565 → blitDirtyRegion (memcpy) → dumb buffer back → pageFlip → di
 Touch → evdev → PEG mouse mapping
 ```
 
-#### Buffer: Test 6 utilizza meno buffer del Test 0
+### Esito attuale (2026-07-13 sera)
 
-> Confronto architetturale tra **Test 0** (baseline SDL RGB565, senza `EMBEDDED_HMI_RT_NATIVE_TEXTURE`) e **Test 6** (`EMBEDDED_HMI_RT_DRM_DIRECT`). Riferimento codice: repo `pegenstein`, cartella `PegLib/`.
+> ✅ **Test 6 validato su RT, GUI e stabilità:** worst `rtc_handler_us` **105 µs**; solo **2** attivazioni > 100 µs su **432 000**; rettangoli bianchi risolti; **aggiunta linee al grafico** senza crash (`libcad2d` 3ª build già deployata durante la campagna).
 
-**Regola comune a entrambi i test**
+| Asse | Esito attuale Test 6 |
+|------|----------------------|
+| **RT** | ✅ worst **105 µs** · `count_ge_100` = **2**/432k · IPC worst **0,38** · L2 miss worst **31,6%** |
+| **GUI** | ✅ touch OK · ✅ linee orizzontali risolte · ✅ rettangoli bianchi assenti · scroll pesante `updateMs` 61–70 ms |
+| **CPU** | ✅ idle PegExec **4%** / Lnk **19%** · stress PegExec **30,5%** / Lnk **22%** |
+| **Stabilità** | ✅ **~30 min** senza crash · scroll · navigazione · **edit linee grafico** (`Pezzoview` + `PezzoFrame`) |
 
-Il framebuffer software dove PEG disegna **non si può eliminare**: è un solo buffer in RAM, RGB565, condiviso tra i due path.
+**Stato codice:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` su branch `experiment/test6-drm` (`PegLib`); fix stabilità in `pressbrakepeg/cad2d/` (`PezzoForm`, `PezzoFormLAlpha`, `Pezzoview`, `PezzoFrame`).
 
-- Allocazione: `peg_run.cpp` → `createSurface()` → `g_pyBitmap` / `PEG_SetFrameBuffer()`
-- Implementazione: `peglvglwindow.cpp` → `m_framebuffer` (`calloc` full screen)
+**Prossimi passi:**
 
-**Test 0 — buffer nel path SDL/KMSDRM (baseline)**
+1. ✅ Campagna **~30 min** con `libcad2d` 3ª build — zero segfault (scroll, navigazione, **aggiunta linee**)
+2. **Promuovere Test 6 a produzione** — merge `experiment/test6-drm` → main, deploy `libPegLib.so` + `libcad2d.so` + `PegExec`
+3. Opzionale: campagna estesa **60 min** per margine documentale
+4. Pin permanente `Lnk` su CPU3 (`taskset -cp 3 $(pidof Lnk)`)
 
-| # | Buffer | Variabile / API | Dove |
-|---|--------|-----------------|------|
-| 1 | Framebuffer PEG | `g_pyBitmap` → `m_framebuffer` | RAM CPU |
-| 2 | Texture SDL streaming | `m_texture` (`SDL_CreateTexture`, `SDL_PIXELFORMAT_RGB565`) | memoria GPU/GEM |
-| 3 | Back buffer renderer GLES | `m_renderer` (`SDL_CreateRenderer`, driver `opengles2`) | GPU |
-| 4–5 | Doppio buffering scanout display | `SDL_VIDEO_DOUBLE_BUFFER=1` in `configureEmbeddedSdlVideo()` | KMSDRM (gestito da SDL) |
-
-**Totale Test 0: ~5 buffer** (1 PEG + 1 texture + 1 back buffer GPU + 2 scanout).
-
-Catena dati Test 0:
+**Verifica deploy (atteso in avvio):**
 
 ```text
-g_pyBitmap (RGB565)
-  → SDL_UpdateTexture(m_texture)
-  → SDL_RenderCopy(m_renderer, m_texture, …)
-  → SDL_RenderPresent()
-  → 2 FB scanout KMSDRM
-  → display
+[RT] crashdiag: handler SIGSEGV/SIGABRT/SIGBUS attivo (backtrace su stderr)
+[RT] drm_direct: Opzione D — output DRM dumb RGB565, SDL solo eventi
+[RT] PegLib build … …
+[RT] rtos.ini XRes=1024 YRes=768 → framebuffer PEG 1024x768 … display 1024x600 …
+[RT] drm: KMS disponibile su /dev/dri/card1
+[RT] drm: damage tracking attivo (sync integrale PEG→back se damage>=15% o blit>=6)
+[RT] evdev: touch multitouch (...) da /dev/input/event2 "ILITEK ILITEK-TP"
 ```
 
-Citazioni codice (Test 0):
-
-```cpp
-// peglvglwindow.h — oggetti SDL del path baseline
-SDL_Window *m_window;
-SDL_Renderer *m_renderer;
-SDL_Texture *m_texture;
-unsigned char *m_framebuffer;   // = g_pyBitmap
-
-// peglvglwindow.cpp — texture RGB565 (Test 0: senza EMBEDDED_HMI_RT_NATIVE_TEXTURE)
-m_texture = SDL_CreateTexture(m_renderer, pixelFormat, SDL_TEXTUREACCESS_STREAMING, m_width, m_height);
-
-// peglvglwindow.cpp — doppio buffering scanout
-SDL_setenv("SDL_VIDEO_DOUBLE_BUFFER", "1", 0);
-SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengles2");
-```
-
-> **Nota (Test 5):** con RGB565 la texture SDL può innescare una `SDL_ConvertPixels()` nascosta verso un formato nativo GLES2 — buffer staging aggiuntivo **interno a SDL**, non visibile nel nostro codice ma presente nel path baseline.
-
-**Test 6 — buffer nel path DRM dumb diretto**
-
-| # | Buffer | Variabile / API | Dove |
-|---|--------|-----------------|------|
-| 1 | Framebuffer PEG | `g_pyBitmap` → `m_framebuffer` | RAM CPU (identico al Test 0) |
-| 2 | Dumb buffer scanout *front* | `m_buffers[0]` (`drm_mode_create_dumb`) | memoria DRM/scanout |
-| 3 | Dumb buffer scanout *back* | `m_buffers[1]` | memoria DRM/scanout |
-
-**Totale Test 6: 3 buffer** (1 PEG + 2 scanout).
-
-Catena dati Test 6:
-
-```text
-g_pyBitmap (RGB565)
-  → blitDirtyRegion() — memcpy CPU
-  → m_buffers[m_backIndex] (dumb RGB565)
-  → drmModePageFlip()
-  → display
-```
-
-Citazioni codice (Test 6):
-
-```cpp
-// peglvglwindow.cpp — niente SDL video/texture/GPU
-if (SDL_Init(SDL_INIT_EVENTS | SDL_INIT_TIMER) != 0)  // solo eventi + timer
-m_drmOutput = new PegDrmOutput();
-m_drmOutput->initialize(w, h, bits);
-
-// pegdrmoutput.h — esattamente 2 dumb buffer per il pageflip
-} m_buffers[2];   // double buffering scanout
-
-// pegdrmoutput.cpp — allocazione dei due buffer
-if (!createBuffer(m_buffers[0]) || !createBuffer(m_buffers[1]))
-
-// peglvglwindow.cpp — upload senza texture SDL
-m_drmOutput->blitDirtyRegion(m_framebuffer, pitch, left, top, right, bottom);
-```
-
-**Riepilogo confronto Test 6 vs Test 0**
-
-| Aspetto | Test 0 | Test 6 |
-|---------|--------|--------|
-| **Numero totale di buffer** | **~5** | **3** |
-| Framebuffer PEG | 1 | 1 (invariato) |
-| Buffer scanout sul display | 2 (via SDL/KMSDRM) | 2 (via DRM dumb) |
-| Texture SDL | 1 | **0 — eliminata** |
-| Back buffer GPU (GLES) | 1 | **0 — eliminato** |
-| Lavoro GPU (`RenderCopy`, texture upload) | sì | **no** (copia su CPU + pageflip DRM) |
-| RSS `PegExec` misurato | ~196 MiB | ~180 MiB (−8%) |
-
-```text
-Test 0:  [PEG FB] → [texture SDL] → [back buffer GLES] → [scanout ×2] → display
-              1            2                 3                  4–5
-
-Test 6:  [PEG FB] ──memcpy──→ [dumb back] ⇄ pageflip ⇄ [dumb front] → display
-              1                      2                    3
-```
-
-**Cosa significa in pratica**
-
-- **Sì:** il Test 6 utilizza **meno buffer** del Test 0 — rimuove la texture SDL e il back buffer del renderer OpenGL ES2 (da ~5 a 3 buffer contati nel codice).
-- **No:** non elimina il framebuffer PEG né il doppio buffering sul display (servono sempre 2 buffer scanout per il pageflip senza tearing).
-- **Trade-off misurato:** meno buffer e meno lavoro GPU, ma il carico si sposta su **CPU** (`memcpy` verso dumb buffer + attesa `pageFlip`) — per questo `updateMs`, `effMBps` e `%CPU` scroll risultano **peggiori** del Test 0 nonostante meno buffer (vedi tabella risultati sotto).
-
-| Campo | Valore |
-|-------|--------|
-| **Build/macro** | `EMBEDDED_HMI_RT_STATS` + `EMBEDDED_HMI_RT_DRM_DIRECT` (no `RT_NATIVE_TEXTURE`, no `RT_DIAG` SDL) |
-| **Config target** | produzione `XRes=1024 YRes=768` + `XView=1024 YView=600`, `Bpp=16` |
-| **Scenario** | idle (nessun touch) \| scroll grafico (drag touch) — protocollo standard |
-
-| Scenario | calls/s | reqMBps | updateMs/s | effMBps | maxRectPx | %CPU PegExec | RES PegExec | rtc_handler_us |
-|----------|--------:|--------:|-----------:|--------:|----------:|-------------:|------------:|---------------:|
-| idle (no touch) | **29–33** | **~18–24** | **247–282** | **82–90** | **485 051** | **7,9%** | **180 MB** | _n/d_ |
-| scroll grafico | **4–6** | **~1,6–2,4** | **30–46** | **50–58** | **212 544** (max 301 644) | **38,4%** | **180 MB** | **112 µs** worst |
-
-**Log esempio idle (grafico animato, nessun touch):**
-
-```text
-[RT] uploadDirtyRegion: calls=33 req=24.58MB reqMBps=23.96 updateMs=282.332 effMBps=87.0 maxRectPx=485051
-[RT] uploadDirtyRegion: calls=33 req=24.37MB reqMBps=23.75 updateMs=270.092 effMBps=90.2 maxRectPx=485051
-```
-
-**Log esempio scroll grafico:**
-
-```text
-[RT] uploadDirtyRegion: calls=6 req=2.41MB reqMBps=1.85 updateMs=45.602 effMBps=52.9 maxRectPx=212544
-[RT] uploadDirtyRegion: calls=4 req=1.60MB reqMBps=1.58 updateMs=30.354 effMBps=52.8 maxRectPx=212544
-[RT] uploadDirtyRegion: calls=4 req=1.79MB reqMBps=1.77 updateMs=31.093 effMBps=57.6 maxRectPx=301644
-```
-
-**Metriche RT task — worst case durante scroll** (CPU3):
-
-```text
-[WORST rtc_handler_us] iter=1357  rtc_handler_us=112 us
-  L2 miss=26.87%  bus_access=8771  bus_cycles=298112  CPI=4.24
-```
-
----
-
-#### CPU / memoria — `top` (2026-07-09)
-
-| Condizione | %CPU `PegExec` | %CPU `Lnk` | RES `PegExec` | Stato `PegExec` |
-|------------|---------------:|-----------:|--------------:|:----------------|
-| Interfaccia attiva, no touch | **7,9%** | **19,5%** | **179 956 KB** (~27,5% MEM) | S (sleep) |
-| Scroll grafico (interazione) | **38,4%** | **20,9%** | **179 956 KB** | R (running) |
-
-| Δ scroll − idle (`PegExec`) | Test 6 (DRM) | Test 4 baseline 1024×600 (SDL) |
-|-----------------------------|-------------:|-------------------------------:|
-| Incremento CPU | **+30,5 pp** (7,9→38,4%) | +23,1 pp (7,3→30,4%) |
-
-**`top` (estratto Test 6):**
-
-```text
-# idle — no touch
-  1630 root  19.5  20.1  415484 131960  S  Lnk
-  1580 root   7.9  27.5 1357288 179956  S  PegExec
-
-# scroll grafico
-  1580 root  38.4  27.5 1357288 179956  R  PegExec
-  1630 root  20.9  20.1  415484 131960  S  Lnk
-```
-
-**Interpretazione CPU/RAM:**
-
-- `PegExec` RES **~180 MiB** vs **~196 MiB** del path SDL (Test 4): −8% RAM — atteso senza contesto SDL video/renderer/GPU.
-- A riposo CPU simile al baseline (+0,6 pp su `PegExec`); `Lnk` invariato ~19–21%.
-- In **scroll** `PegExec` sale a **38,4%** (+30,5 pp) — **peggio del baseline SDL** (+23 pp) e del 5b atteso (~30% a 1024×600). Coerente con `updateMs` alto e memcpy CPU-bound verso dumb buffer.
-
----
-
-**Confronto scroll / area grande** (`maxRectPx≈485051`, stesso viewport 1024×600):
-
-| Metrica | Test 0 (SDL RGB565) | Test 5b (ARGB nativo) | **Test 6 (DRM dumb)** | Test 6 vs 5b |
-|---------|--------------------:|----------------------:|----------------------:|-------------:|
-| `reqMBps` | ~24 | ~47,5 | **~24** | −50% (atteso: RGB565 vs ARGB) |
-| `updateMs/s` | ~208–220 | **~165–170** | **~247–282** (idle anim.) | **+50…+70%** peggiore |
-| `effMBps` | ~112–117 | **~287–295** | **~82–90** | **−70%** |
-| `rtc_handler_us` max | 122 µs | 123 µs | **112 µs** | **−9 µs** |
-| `bus_access` | 24 755 | **8 803** | **8 771** | ≈ uguale |
-
-**Confronto scroll attivo** (`maxRectPx≈212k–302k`, area dirty più piccola durante pan):
-
-| Metrica | Test 5b idle (223k px) | **Test 6 scroll** | Note |
-|---------|----------------------:|------------------:|------|
-| `updateMs/s` | 11–15 | **30–46** | D ancora più lento a parità di area simile |
-| `effMBps` | 256–270 | **50–58** | memcpy→dumb buffer + pageflip vs GPU texture |
-
-**Osservazioni:**
-
-- ✅ **Unico miglioramento RT misurato su `rtc_handler_us`:** 112 µs vs 122–123 µs (−8…−9%), ma **obiettivo < 100 µs non raggiunto** (mancano ~12 µs).
-- ✅ `bus_access` in linea con Test 5b (~8,8k), molto sotto baseline Test 0 (~24,8k).
-- ❌ **Costo GUI alto:** in idle con grafico animato (`maxRectPx=485051`) `updateMs` ~270–282 ms — **peggio del Test 0** (~220 ms) e molto peggio del 5b (~170 ms scroll).
-- ❌ **CPU scroll:** `PegExec` **38,4%** in interazione vs **30,4%** baseline SDL a parità viewport — il bypass GPU non alleggerisce la CPU, anzi la carica di più.
-- Durante lo **scroll** l'area dirty si riduce (`maxRectPx≈212k`) e `updateMs` scende a ~30–46 ms — pattern **invertito** rispetto a 5b (dove lo scroll era lo scenario peggiore); probabile diverso partizionamento dirty PEG + attesa `pageFlip` DRM.
-- Il touch funziona dopo fix evdev (`m_reportedDown` su `SYN_REPORT`).
-
-> **Conclusione:** ⚠️ **Test 6 misto — assi opposti.**
->
-> - ❌ **GUI (trasferimento dati):** `effMBps` e `updateMs` **peggiori** del Test 5b e del baseline — non candidato per produzione display.
-> - ⚠️ **RT (ritardo nanosleep):** `rtc_handler_us` **112 µs** (−9 µs vs 5b) — unico miglioramento RT misurato, ma **obiettivo < 100 µs non raggiunto** (mancano ~12 µs).
->
-> Opzione D migliora leggermente il worst-case RT task e mantiene il basso traffico bus del 5b, ma penalizza fortemente l'upload display. Non sostituisce il 5b.
-
-**Riduzione framebuffer / bypass pipeline display (lezione Test 6):**
-
-> La strada della **diminuzione dei framebuffer** (eliminare layer intermedio texture/GPU o ridurre il doppio buffering scanout) si è rivelata **molto complicata** nel nostro stack: il framebuffer software PEG (`g_pyBitmap`) è intrinseco al motore di disegno PEG e non è rimovibile senza riscrivere `screen.cpp`, i driver DIB (`dib16.cpp` / `PEG_DoubleBufferingRefresh`) e gran parte della catena GUI. Il Test 6 (Opzione D) ha dimostrato che bypassare SDL/GPU è **tecnicamente fattibile** come POC (`pegdrmoutput.cpp`), ma con costi GUI alti e integrazione touch/display non banale. **Non è impossibile**, ma richiede un **approfondimento futuro** dedicato (refactor architetturale display, non una semplice macro): valutare solo se le leve kernel/driver (DCC, pixel clock, Bpp) non bastano a raggiungere l'obiettivo RT < 100 µs.
-
-**Esito sintetico:**
-
-| Asse | Esito Test 6 |
-|------|--------------|
-| **GUI** (`effMBps` / `updateMs`) | ❌ Peggioramento |
-| **RT** (`rtc_handler_us`) | ⚠️ Leggero miglioramento (112 µs), obiettivo <100 non raggiunto |
-
-**Raccomandazione attuale:** **rollback produzione a Test 0** (`EMBEDDED_HMI_RT_NATIVE_TEXTURE` disattivata) per il display — migliore compromesso RT misurato rispetto al 5b; tenere il codice Opzione D per esperimenti futuri.
-
-**Stato codice:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` **disattivata**; `EMBEDDED_HMI_RT_NATIVE_TEXTURE` **disattivata** (baseline Test 0); codice sorgente Opzione D conservato.
-
-**Verifica deploy:**
+**Verifica rapida binario sul target:**
 
 ```bash
-strings libPegLib.so | grep '\[RT\] drm'
-strings libPegLib.so | grep 'KMS disponibile'
-./PegExec 2>&1 | grep -E '\[RT\] drm|\[RT\] evdev|\[RT\] drm_direct'
+strings /opt/Squeeze/libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 ```
-
-**Atteso in avvio:**
-
-```text
-[RT] drm_direct: Opzione D — output DRM dumb RGB565, SDL solo eventi
-[RT] drm: probe /dev/dri/card0 → driver vivante ...
-[RT] drm: KMS disponibile su /dev/dri/card1
-[RT] drm: connector=... mode=... buffer=1024x600 RGB565
-[RT] evdev: touch multitouch (...) da /dev/input/eventN
-```
-
-**Rollback:** commentare `EMBEDDED_HMI_RT_DRM_DIRECT`, riattivare `EMBEDDED_HMI_RT_NATIVE_TEXTURE`, rebuild.
 
 ---
 
@@ -889,7 +912,7 @@ Se l'interfaccia **si avvia a metà e poi si blocca**:
 1. Verificare `rtos.ini` coerente (per test stabili: `XRes=800` `YRes=600` senza `XView`/`YView`, oppure produzione 1024×600 che prima funzionava)
 2. Riavviare la scheda se DRM è in stato sporco dopo un crash
 3. Controllare che `PegExec` e `libPegLib.so` siano della **stessa build**
-4. Il warning `XView/YView != XRes/YRes` è informativo su 1024×600 viewport — non dovrebbe da solo bloccare l'avvio, ma su embedded conviene allineare i valori
+4. Il warning `XView/YView != XRes/YRes` **non è più un problema di sicurezza** se il log mostra `framebuffer PEG 1024x768` — il buffer deve essere `XRes×YRes`, il display `XView×YView`
 
 ---
 
@@ -1306,6 +1329,8 @@ ForceBPP=True   ; obbligatorio: forza il valore da ini
 ## Note operative
 
 - **Deploy:** copiare sempre `libPegLib.so*`, `PegExec` **e** `rtos.ini` aggiornato in `/opt/Squeeze/`
+- **Verifica build:** `strings libPegLib.so | grep -E 'crashdiag|PegLib build|framebuffer PEG'`
+- **Crash:** se `core` assente, usare backtrace `[RT] FATAL` su stderr oppure `coredumpctl gdb PegExec`
 - **Avvio RT:** non avviare Lnk subito dopo PegExec — attendere **≥ 30 s** (vedi protocollo sopra)
 - **Trappola:** log `[RT]` visibili con `.so` vecchio anche se macro commentata → verificare con `strings`
 - **Diagnosi SDL:** `strings libPegLib.so | grep '\[RT\] diag'` — se assente, macro `EMBEDDED_HMI_RT_DIAG` non compilata

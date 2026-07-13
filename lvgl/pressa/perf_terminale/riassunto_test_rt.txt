@@ -1,0 +1,193 @@
+================================================================================
+RIASSUNTO TEST RT — GUI PEG/SDL su i.MX8M Plus (avn8mp)
+================================================================================
+Data aggiornamento: 2026-07-13
+Piattaforma: i.MX8M Plus, kernel 6.6.23-rt28, display LVDS 1024x600
+Stack: PEG disegna su framebuffer software → uploadDirtyRegion() → SDL/KMSDRM
+       → OpenGL ES2 → scanout DRM → pannello
+
+OBIETTIVO
+  Ridurre l'interferenza real-time della GUI sul task RTC (obiettivo: rtc_handler_us
+  worst case < 100 µs durante uso interfaccia). Non ottimizzazione FPS.
+
+METRICHE USATE
+  - GUI: reqMBps, updateMs, effMBps (log [RT] uploadDirtyRegion ogni ~1 s)
+  - RT:  rtc_handler_us worst case, nanosleep max (PerfMonitor / Lnk su CPU3)
+  - Protocollo: avviare Lnk almeno 30 s dopo PegExec per evitare spike iniziali
+
+================================================================================
+COSA SIGNIFICA "FORMATO NATIVO"
+================================================================================
+In questo contesto "nativo" NON significa "quello che usiamo noi in rtos.ini",
+ma "formato che il blocco hardware/software successivo accetta SENZA convertire
+ogni pixel".
+
+Esempio sul nostro target:
+  - PEG disegna in RGB565 (16 bpp) → questo è il nostro formato applicativo.
+  - Il renderer OpenGL ES2 di SDL supporta nativamente ARGB8888, RGB888, ecc.
+    ma NON RGB565.
+  - Quindi SDL accetta una texture RGB565, ma internamente converte verso un
+    formato GLES nativo (conversione nascosta in SDL_UpdateTexture).
+  - Lo scanout verso il pannello (fb0) risulta a 32 bpp, anche con Bpp=16 in
+    rtos.ini — il plane DRM supporta RG16 (16 bpp) ma SDL+GLES non lo usa.
+
+Test 5b: texture ARGB8888 "nativa" = la texture è nel formato che GLES capisce
+         direttamente, ma PEG resta a 16 bpp e noi convertiamo a mano prima
+         dell'upload (non è "tutto il sistema a 32 bpp dall'inizio").
+
+================================================================================
+ABBiamo provato PEG a 32 bpp dall'inizio (senza conversione)?
+================================================================================
+NO, non come test dedicato.
+
+  - Produzione e quasi tutti i test: Bpp=16 in rtos.ini (RGB565, minimo pratico).
+  - Bpp=24 è presente nel file ma commentato; non è stato eseguito un test
+    comparativo con PEG che disegna direttamente a 24 o 32 bpp.
+  - Test 5b NON era "PEG a 32 bpp": PEG restava a 16 bpp; la conversione
+    RGB565→ARGB8888 avveniva solo al momento dell'upload verso la texture SDL.
+    Risultato: upload GUI più veloce ma più byte sul bus DDR → RT peggiorato.
+
+================================================================================
+RIEPILOGO PER TEST
+================================================================================
+
+--------------------------------------------------------------------------------
+TEST 0 — Baseline (riferimento)
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - Strumentazione RT_STATS: log periodici su upload e present.
+  - Pipeline standard: SDL texture RGB565 + SDL_UpdateTexture + RenderCopy +
+    RenderPresent su KMSDRM/OpenGL ES2.
+  - Bpp=16, risoluzione tipica 1024x600 (viewport) o 800x600 nei test successivi.
+
+Risultati principali (scroll grafico, 1024x600):
+  - reqMBps ~24 MB/s, updateMs ~210 ms/s, effMBps ~115 MB/s
+  - rtc_handler_us worst ~122 µs
+  - Collo di bottiglia: copia CPU verso texture SDL, non saturazione GPU.
+
+Esito: RIFERIMENTO per tutti i confronti successivi.
+
+--------------------------------------------------------------------------------
+TEST 4 — Riduzione risoluzione 800x600
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - Modifica rtos.ini: XRes=800, YRes=600 (senza viewport separato).
+  - Stessa pipeline SDL del Test 0, stesso Bpp=16.
+
+Risultati (scroll grafico):
+  - reqMBps ~10-14 MB/s (−42…−58% vs 1024x600)
+  - updateMs ~115-152 ms/s (−27…−45%)
+  - rtc_handler_us worst ~97 µs (−20% vs 122 µs)
+
+Esito: SUCCESSO su GUI e RT. Unica modifica con beneficio su entrambi gli assi.
+      (Da valutare se il layout HMI consente 800x600 in produzione.)
+
+--------------------------------------------------------------------------------
+TEST 5 — Diagnosi formato SDL (solo log, nessun cambio pipeline)
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - Log all'avvio: SDL_GetRendererInfo, formato finestra, formato texture.
+  - Conferma che il driver è KMSDRM + renderer opengles2.
+
+Risultati:
+  - Texture richiesta: RGB565. Formato nativo per il renderer: NO.
+  - Finestra SDL: ARGB8888. Scanout fb0: 32 bpp.
+  - Probabile SDL_ConvertPixels nascosta in ogni SDL_UpdateTexture.
+
+Esito: DIAGNOSI completata. Spiega perché effMBps baseline è basso rispetto
+       a una memcpy pura. Nessun miglioramento runtime.
+
+--------------------------------------------------------------------------------
+TEST 5b — Texture ARGB8888 nativa + conversione esplicita da RGB565
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - Texture SDL in ARGB8888 (formato nativo GLES).
+  - SDL_ConvertPixels esplicito da framebuffer PEG RGB565 prima di UpdateTexture.
+  - PEG resta a 16 bpp (rtos.ini invariato).
+
+Risultati (scroll, 1024x600):
+  - GUI: effMBps ~287-295 (+150%), updateMs ~165-170 ms/s (−22…−26%) — MIGLIORE
+  - RT:  rtc_handler_us worst 123 µs (una misura) / 191 µs (altra misura) — PEGGIO
+
+Esito: ROLLBACK. Migliora la velocità di upload CPU ma aumenta il traffico DDR
+       (4 byte/pixel sulla texture). Non adatto all'obiettivo RT < 100 µs.
+
+--------------------------------------------------------------------------------
+TEST 6 — DRM dumb buffer RGB565 diretto (bypass SDL video/GPU)
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - Bypass di SDL texture e OpenGL ES2.
+  - Due dumb buffer DRM a 16 bpp RGB565, pageflip diretto.
+  - Touch via evdev (SDL solo per eventi/timer).
+  - Copia dirty region con memcpy CPU da PEG a buffer scanout.
+
+Risultati (prima campagna, 1024x600, Bpp=16):
+  - Meno buffer totali (3 vs ~5 del Test 0), scanout vero 16 bpp RGB565.
+  - GUI: effMBps e updateMs PEGIORI del Test 0 (carico sulla CPU).
+  - RT:  rtc_handler_us worst ~112 µs (leggermente meglio di 122 µs, ma > 100 µs).
+
+Esito: ROLLBACK del POC. RGB565 nativo sullo scanout sì, ma senza accelerazione
+       hardware la GUI soffre. Ripresa in corso su branch experiment/test6-drm.
+
+--------------------------------------------------------------------------------
+TEST B — SDL_LockTexture streaming (invece di SDL_UpdateTexture)
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - Texture già STREAMING; upload con LockTexture + memcpy + UnlockTexture
+    come raccomandato dalla documentazione SDL per texture aggiornate spesso.
+
+Risultati (scroll, 1024x600):
+  - reqMBps, updateMs, effMBps ≈ identici al Test 0 (effMBps leggermente −10%)
+  - rtc_handler_us worst ~120 µs (entro rumore di misura)
+
+Esito: ROLLBACK. Nessun beneficio: stesso mismatch formato RGB565/GLES.
+
+--------------------------------------------------------------------------------
+TEST DCC — Framebuffer compression / prefetch (fase 0)
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - Verifica su target se il LCDIF i.MX8MP espone compressione framebuffer
+    (DEC400, DTRC, prefetch come su altri SoC NXP).
+
+Risultati:
+  - Pipeline: LCDIFv3 → LDB → LVDS. Nessuna API compression nel driver.
+  - dmesg e modetest: solo scanout lineare da DDR.
+
+Esito: NON APPLICABILE su i.MX8MP con il BSP attuale.
+
+--------------------------------------------------------------------------------
+TEST 7 — Pixel clock display (fase 0)
+--------------------------------------------------------------------------------
+Cosa abbiamo fatto:
+  - modetest -M imx-drm: mode unico 1024x600 @ 64,31 Hz, pixel clock 49,5 MHz.
+  - clk_summary: media_disp2_pix = 49,5 MHz (già sotto i 74,25 MHz tipici LVDS).
+
+Risultati:
+  - Un solo mode DRM → impossibile abbassare clock da userspace (modetest).
+  - Ulteriore riduzione richiede patch device tree / kernel nel BSP Yocto.
+
+Esito: SOSPESO nel percorso applicativo. Diagnosi completata.
+
+--------------------------------------------------------------------------------
+Bpp / profondità colore
+--------------------------------------------------------------------------------
+  - Sistema già a Bpp=16 (RGB565) in rtos.ini — minimo pratico sul path attuale.
+  - Non testato Bpp=24/32 su PEG come esperimento dedicato.
+
+================================================================================
+PRODUZIONE ATTUALE E PROSSIMI PASSI
+================================================================================
+Produzione: Test 0 baseline (SDL RGB565, RT_STATS; macro 5b/6/B disattivate).
+
+Leve ancora da esplorare lato applicazione (senza riscrivere il BSP):
+  1. Ottimizzazione immagini (formati indicizzati/compressi, meno bitmap grandi)
+  2. Font Unicode — solo range caratteri necessari
+  3. Riduzione dirty region (animazioni idle, bounding box popup)
+  4. Risoluzione 800x600 se accettabile sul layout (Test 4 — già validato)
+
+Leve archiviate o a basso ROI:
+  - LockTexture, formato nativo GLES (5b), pixel clock senza BSP, DCC
+
+Documentazione dettagliata: registro_test_rt.md (stessa cartella perf_terminale)
+
+================================================================================
