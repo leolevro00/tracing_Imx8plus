@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-13 sera** (Test 6: campagna **~30 min** OK · worst **105 µs** · `count_ge_100` = **2**/432 000 · stabilità **`libcad2d` 3ª build** incluso edit linee grafico ✅)
+> Ultimo aggiornamento: **2026-07-15** (RT campagna 1h15 **99 µs** · freeze Optimize **`THR_ENDSOL`** **risolto** build **8ª** · validazione 4 pieghe)
 
 ---
 
@@ -10,7 +10,7 @@
 | File | Contenuto |
 |------|-----------|
 | `pipeline_peg_sdl_drm_rt.md` | Architettura pipeline, thread, ruolo LVGL |
-| `analisi_metriche_gui_rt.md` | Significato di `calls`, `reqMBps`, `updateMs`, `effMBps`, `maxRectPx` |
+| `analisi_metriche_gui_rt.md` | Significato di `calls`, `reqMBps`, `effMBps`, `maxRectPx`; **`updateMs` per test** → [sezione dedicata](#significato-updateMs) in questo registro |
 | `interferenza_cpu_ddr_idle_vs_interazione.md` | Argomento CPU/DDR vs GPU per la tesi |
 | `riduzione_framebuffer_esperimenti.md` | Opzioni A–E (formato texture, LockTexture, DRM diretto, …) |
 | `osservazioni` / `test-perf` | Note raw su `perf stat`, `htop`, `gc/meminfo` |
@@ -68,6 +68,49 @@ Per ogni test, due scenari sul target:
 - `htop`/`top`: %CPU e RES di `PegExec`
 - Opzionale: `perf stat` (vedi `osservazioni`)
 
+<a id="significato-updateMs"></a>
+
+#### Significato di `updateMs` — cosa cronometra in ogni test
+
+> **Definizione comune** (tutti i test con `EMBEDDED_HMI_RT_STATS`): `updateMs` è la **somma del tempo CPU** (in millisecondi) speso **dentro** la fase di upload della dirty region in `uploadDirtyRegion()`, **accumulata nell’ultima finestra di report (~1 s)**. Non è la durata di un singolo frame né il tempo totale della pipeline display.
+>
+> Implementazione: `peglvglwindow.cpp` — `rtT0` immediatamente prima dell’upload, `rtT1` subito dopo; `s_rtStatsUpdateNs += (rtT1 - rtT0)`.
+
+**Formula correlata:**
+
+```text
+effMBps = req_MB / (updateMs / 1000)   → throughput solo nel tempo “dentro” l’upload
+reqMBps = req_MB / durata_finestra_s    → byte al secondo di calendario (include pause tra upload)
+```
+
+| Test | Macro / path | Cosa include `updateMs` | Cosa **non** include |
+|------|--------------|-------------------------|----------------------|
+| **0** | baseline SDL | **`SDL_UpdateTexture()`** — copia framebuffer PEG → texture SDL (RGB565; conversione nascosta possibile in SDL) | `SDL_RenderCopy`, `SDL_RenderPresent` (`flushPresent`) |
+| **1** | `flushPresent(false)` | Identico al **Test 0** (stesso cronometro su `SDL_UpdateTexture`) | come Test 0 |
+| **2** | coalescing motion | Identico al **Test 0** | come Test 0 |
+| **3** | SW surface (rollback) | *(non in produzione)* upload verso surface SDL — stesso concetto di copia dirty | present SDL |
+| **4** | risoluzione 800×600 | Identico al **Test 0** (stesso path SDL; meno pixel → `updateMs` più basso) | come Test 0 |
+| **5** | solo diagnosi | Identico al **Test 0** (nessun cambio pipeline) | come Test 0 |
+| **5b** | `RT_NATIVE_TEXTURE` | **`SDL_ConvertPixels(RGB565→ARGB8888)`** + **`SDL_UpdateTexture()`** (texture ARGB8888 nativa) · `req` conta byte **ARGB** (4 bpp) | `RenderCopy`, `RenderPresent` |
+| **6** | `RT_DRM_DIRECT` | **`PegDrmOutput::blitDirtyRegion()`** — `memcpy` RGB565 PEG → dumb buffer back DRM, incluso catch-up zone stale e dirty corrente | **`syncBackFromPeg()`** (copia integrale pre-flip), **`drmModePageFlip()`**, drain coda dirty in `flushPresent()` |
+| **B** | `RT_STREAMING_LOCK` (rollback) | **`SDL_LockTexture()`** + `memcpy` riga-per-riga + **`SDL_UnlockTexture()`** | `RenderCopy`, `RenderPresent` |
+
+**Attenzione al confronto Test 0 vs Test 6:**
+
+- Il **nome** della metrica è lo stesso, ma il **contenuto** del cronometro cambia (`SDL_UpdateTexture` vs `blitDirtyRegion`).
+- In **Test 6**, `updateMs` **sottostima** il carico CPU reale in scroll: ogni pageflip esegue anche **`syncBackFromPeg()`** (~viewport intero, es. 1,17 MiB @ 1024×600) **fuori** da `updateMs`. Spiega perché `updateMs` può scendere del ~70% ma `%CPU` in `top` resta ~30%.
+- In **Test 0**, il present (`RenderCopy` + `RenderPresent`) è anch’esso **fuori** da `updateMs`; il lavoro GPU/scanout 32 bpp non è contabilizzato in questa metrica.
+
+**Verifica deploy path attivo:**
+
+```bash
+strings /opt/Squeeze/libPegLib.so | grep -E 'drm_direct|native_texture|SDL_LockTexture path'
+# Test 6:  [RT] drm_direct: Opzione D ...
+# Test 5b: [RT] native_texture: Test 5b ...
+# Test B:  [RT] upload path: SDL_LockTexture + memcpy ...
+# Test 0:  (nessuna delle stringhe sopra)
+```
+
 **Verifica deploy:**
 
 ```bash
@@ -108,6 +151,70 @@ strings libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 
 **Nota:** questa trappola spiega confronti incoerenti tra commit identici, tra reboot e avvio manuale da terminale, e tra misure “ieri ok / oggi no” con lo stesso codice.
 
+<a id="rt-metodologia-scheduler"></a>
+
+#### Metodologia misura RT — proxy scheduler (`COM RTC Handler`, CPU3)
+
+> **Cosa si misura davvero:** non il ritardo di *ogni* thread del sistema, ma il **ritardo di risveglio del `nanosleep`** nel thread **`COM RTC Handler`** su **CPU3**. Questo thread fa da **scheduler RT** per gli altri task real-time sulla stessa CPU.
+
+**Perché basta (per ora) misurare solo lui**
+
+In un programma di test **minimale** (scheduler + un solo worker bloccato su semaforo) è stato osservato che:
+
+- se il **`nanosleep` dello scheduler non slitta**, anche il **semaforo** su cui attende l’altro thread **non slitta**;
+- il ritardo del risveglio scheduler è quindi un **proxy conservativo** dell’interferenza GUI/DDR sulla catena RT su CPU3.
+
+Per le campagne GUI (Test 0–6) la metrica registrata resta:
+
+| Metrica | Significato |
+|---------|-------------|
+| **`nanosleep` max/min** | latenza cumulata del ciclo scheduler (log ogni N attivazioni) |
+| **`rtc_handler_us` worst** | istanza peggiore del handler RTC, con contatori PMU (`bus_access`, L2 miss, IPC, …) |
+| **Conteggio > 100 µs** | spike oltre soglia obiettivo produzione |
+
+**Obiettivo:** `rtc_handler_us` / `nanosleep` max **< 100 µs** (spike occasionali accettabili se rare, es. < 0,001% delle attivazioni).
+
+**Processo strumentato:** `./Enk` (Lnk / PerfMonitor) — il monitor aggancia il thread **`COM RTC Handler`**, non l’intero albero `./Enk`.
+
+**Thread su CPU3 — cosa include / esclude** (screenshot `htop`, ottimizzatore in run):
+
+| Thread | CPU | Priorità (PR) | Misura RT? | Note |
+|--------|-----|---------------|------------|------|
+| **`COM RTC Handler`** | **3** | **−65** | ✅ **Sì — metrica principale** | scheduler RT, `nanosleep` |
+| PLC Supervisor | 3 | −66 | ⬜ candidato estensione | RT, CPU3 |
+| PLCScheduler | 3 | −65 | ⬜ candidato estensione | RT, CPU3 |
+| MainRegol | 3 | −63 | ⬜ candidato estensione | RT, CPU3 |
+| MainSlave | 3 | −61 | ⬜ candidato estensione | RT, CPU3 |
+| PLC FAST | 3 | −62 | ⬜ candidato estensione | RT, CPU3 |
+| PLC SLOW | 3 | −59 | ⬜ candidato estensione | RT, CPU3 |
+| NCRun | 3 | −57 | ⬜ candidato estensione | RT, CPU3 |
+| VerifyCommand | 3 | −43 | ⬜ candidato estensione | RT, CPU3 |
+| **OSC Server** | **0** | 20 | ❌ **No** | non RT, altra CPU |
+| PlcSMDisplay | 2 | 20 | ❌ No | non su CPU3 |
+| PLC Log | 2 | 20 | ❌ No | non su CPU3 |
+| `./Enk` (main) | 1 | 20 | ❌ No | processo host, non scheduler |
+
+**Verifica affinità prima di ogni campagna:**
+
+```bash
+taskset -cp $(pidof Enk)    # o pidof Lnk — verificare quale wrapper usate sul target
+# atteso per i thread RT: mask CPU3 = 0x8
+
+# in htop: F2 → Columns, oppure filtrare per CPU 3 e PR negativo
+```
+
+**Estensione futura (opzionale — completare il quadro):**
+
+Misurare anche il **ritardo di risveglio dei worker RT** bloccati su **semaforo** (es. `MainRegol`, `NCRun`, `PLC FAST`), sempre **solo thread RT su CPU3**:
+
+1. timestamp uscita da `nanosleep` nello scheduler (`COM RTC Handler`);
+2. timestamp post su semaforo + timestamp risveglio worker;
+3. delta **semaphore wake latency** = ritardo oltre il periodo nominale del ciclo RT.
+
+Se il proxy scheduler resta < 100 µs e in futuro un worker mostrasse spike isolati, la causa sarebbe **downstream** (priorità, lock interni PLC) e non interferenza GUI — utile per separare i due problemi.
+
+> **Regola pratica campagne GUI:** finché **`COM RTC Handler` ≤ 100 µs** con **0 spike** su centinaia di migliaia di attivazioni (es. ottimizzatore ≥ 10 min, 73k+ att.), la GUI Test 6 **non degrada la catena RT** misurata finora.
+
 ---
 
 <a id="stato-test"></a>
@@ -124,12 +231,12 @@ strings libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 | **4** | Riduzione risoluzione **800×600** (Opzione 1) | ✅ GUI −27…45% · RT **97 µs** (−20%) | [→ TEST 4](#test-4) |
 | **5** | Diagnosi formato texture SDL (Opzione A) | ✅ Diagnosi mismatch RGB565 · nessun fix runtime | [→ TEST 5](#test-5) |
 | **5b** | Texture ARGB8888 nativa + conversione esplicita | ✅ GUI +150% · ❌ RT **191 µs** → **rollback** | [→ TEST 5b](#test-5b) |
-| **6** | DRM dumb buffer RGB565 (Opzione D POC) | ✅ RT · ✅ GUI · ✅ stabilità **30 min** + edit linee | [→ TEST 6](#test-6) |
+| **6** | DRM dumb buffer RGB565 (Opzione D POC) | ✅ RT · ✅ GUI · ✅ stabilità **7ª build** (Calculate 40/40 OK, 2026-07-14) | [→ TEST 6](#test-6) |
 | **B** | `SDL_LockTexture` streaming (Opzione B) | ❌ ≈ Test 0 · **rollback** | [→ TEST B](#test-b) |
 | **DCC** | Framebuffer Compression / Prefetch (fase 0) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ TEST DCC](#test-dcc) |
 | **7** | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ TEST 7](#test-7) |
 
-**Produzione attuale:** Test **6** su branch `experiment/test6-drm` — **pronto per promozione** (RT, GUI, stabilità ~30 min con `libcad2d` 3ª build, incluso aggiunta linee al grafico). Test **0** resta fallback noto.
+**Produzione attuale:** Test **6** su branch `experiment/test6-drm` — RT/GUI OK; stabilità **validata** (build **7ª** `libcad2d` + `libsim2d` + `libottimizzatore`, Calculate 40/40). Test **0** resta fallback noto.
 
 ### Prossimi test
 
@@ -151,7 +258,7 @@ strings libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 | Asse | Metriche | Cosa misura |
 |------|----------|-------------|
 | **GUI** | `effMBps`, `updateMs`, `reqMBps` | Upload interfaccia (`uploadDirtyRegion` → SDL) |
-| **RT** | `rtc_handler_us`, `nanosleep` max | Latenza task RT; obiettivo **< 100 µs** |
+| **RT** | `rtc_handler_us`, `nanosleep` max | Ritardo risveglio **`COM RTC Handler`** (scheduler RT, CPU3) — vedi [metodologia](#rt-metodologia-scheduler); obiettivo **< 100 µs** |
 
 > Un test può migliorare la **GUI** senza migliorare il **RT**, e viceversa.
 
@@ -174,6 +281,8 @@ strings libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 ---
 
 **Modifica:** macro `EMBEDDED_HMI_RT_STATS` in `PegLib/peglvglwindow.cpp` — log ogni ~1 s su stderr.
+
+> **`updateMs` in questo test:** tempo cumulato in **`SDL_UpdateTexture()`** per finestra (~1 s). Vedi [tabella per test](#significato-updateMs).
 
 **Risultati `[RT]` (risoluzione ~960×640, 16 bpp):**
 
@@ -219,6 +328,8 @@ strings libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 - `Files/avn8mp/rtos.ini`: `XRes=800`, `YRes=600` (senza `XView`/`YView` attivi)
 - `EMBEDDED_HMI_RT_STATS` per misure a confronto
 - Log avvio risoluzione in `peg_run.cpp`
+
+> **`updateMs` in questo test:** identico al **Test 0** (`SDL_UpdateTexture`); cambia solo la quantità di pixel per dirty region (risoluzione minore).
 
 **Config sul target:**
 
@@ -356,6 +467,8 @@ nanosleep: min=12, max=97  (ultime ~44000 attivazioni)
 | **Obiettivo** | verificare mismatch formato texture / renderer e configurazione buffer KMSDRM. |
 | **Modifica** | macro `EMBEDDED_HMI_RT_DIAG` + `rtDiagLogSdlPipeline()` in `peglvglwindow.cpp` (solo log, nessun cambio pipeline). |
 
+> **`updateMs` in questo test:** identico al **Test 0** — solo diagnosi, nessun cambio al cronometro.
+
 **Log raccolti sul target (2026-07-09):**
 
 ```text
@@ -487,6 +600,8 @@ PEG RGB565 (16 bpp, RAM)  →  SDL/GLES (conversione + compositing)  →  fb0 sc
 - in `uploadDirtyRegion()`: `SDL_ConvertPixels(RGB565 → ARGB8888)` su buffer staging riusabile, poi `SDL_UpdateTexture` con pitch `rect.w * 4`
 - metriche `[RT]`: `reqMBps` conta byte **ARGB8888** (4 bpp) per confronto onesto del costo upload texture
 
+> **`updateMs` in questo test:** tempo cumulato in **`SDL_ConvertPixels(RGB565→ARGB8888)`** + **`SDL_UpdateTexture()`**. `req`/`reqMBps` contano byte ARGB (4 bpp), non RGB565.
+
 | Campo | Valore |
 |-------|--------|
 | **Build/macro** | `EMBEDDED_HMI_RT_STATS` + `EMBEDDED_HMI_RT_DIAG` + `EMBEDDED_HMI_RT_NATIVE_TEXTURE` |
@@ -597,6 +712,8 @@ PEG RGB565 (16 bpp, RAM)  →  SDL/GLES (conversione + compositing)  →  fb0 sc
 - Selezione device DRM: `drmModeGetResources` su ogni card (card0 Vivante → card1 `imx-drm`)
 - Touch evdev: edge detection press/release su `SYN_REPORT` (bug: solo motion, no click PEG)
 
+> **`updateMs` in questo test:** tempo cumulato in **`PegDrmOutput::blitDirtyRegion()`** (`memcpy` PEG → dumb buffer). **Non** include `syncBackFromPeg()` né `pageFlip()` — vedi [tabella per test](#significato-updateMs) e sezione F sotto.
+
 ---
 
 ### Ripresa Test 6 (2026-07-13) — obiettivo RT < 100 µs
@@ -637,6 +754,7 @@ Contesto ripresa su branch `experiment/test6-drm`, config produzione `XRes=1024 
 | Stress test “grafico colorato” (punto critico) | **99 µs** ✅ |
 | Stress prolungato (2026-07-13 pomeriggio) | **102 µs** worst |
 | **Campagna ~30 min** (scroll grafico + navigazione, 2026-07-13 sera) | **105 µs** worst · `count_ge_100` = **2** / **432 000** attivazioni |
+| **Sessione Calculation** (zoom/dezoom sim2d, 2026-07-14) | **109 µs** worst · `count_ge_100` = **3** / **1 068 000** attivazioni |
 
 > `ps` mostrava `Lnk` non pinnato (migrava tra CPU 1/2). Pin esplicito consigliato per misure RT stabili.
 
@@ -696,6 +814,60 @@ Esempi log (scroll leggero):
 ```
 
 GPU non usata (`gc/meminfo` stabile); carico su CPU memcpy + pageflip DRM.
+
+#### F) Confronto `[RT] uploadDirtyRegion` — Test 0 vs Test 6 (2026-07-14)
+
+> Confronto a parità di config **1024×600 viewport**, `Bpp=16`, stesso scenario (idle vs scroll grafico). Test 0 = SDL+texture+GLES; Test 6 = DRM dumb RGB565 diretto.
+
+**Idle / interfaccia ferma (no scroll):**
+
+| Metrica | Test 0 (baseline) | Test 6 (2026-07-14) | Δ / note |
+|---------|------------------:|----------------------:|----------|
+| `calls/s` | 7–9 | **10–12** | simile (refresh periodico PEG) |
+| `reqMBps` | 0,75–1,0 | **4,1–5,3** | Test 6 più alto (dirty leggermente più grandi) |
+| `updateMs/s` | 22–30 | **11–15** | **≈ −50%** — upload più veloce |
+| `effMBps` | 33–36 | **356–373** | **≈ ×10** — memcpy diretto vs SDL |
+| `maxRectPx` | ~66 912 | **237 472–337 022** | area dirty idle maggiore in Test 6 |
+
+**Esempi log idle Test 6 (2026-07-14):**
+
+```text
+[RT] uploadDirtyRegion: calls=11 req=4.61MB reqMBps=4.57 updateMs=12.587 effMBps=371.9 maxRectPx=237472
+[RT] uploadDirtyRegion: calls=10 req=4.15MB reqMBps=4.14 updateMs=11.334 effMBps=366.5 maxRectPx=237472
+```
+
+**Scroll grafico (stress):**
+
+| Metrica | Test 0 (baseline) | Test 6 (2026-07-14) | Δ / note |
+|---------|------------------:|----------------------:|----------|
+| `calls/s` | **~33** | **76–84** | **×2,4** — più upload/s (pipeline più veloce) |
+| `reqMBps` | **~24** | **48–50** | **×2** — più byte copiati al secondo |
+| `updateMs/s` | **208–220** | **60–64** | **≈ −70%** — meno tempo in upload |
+| `effMBps` | **112–117** | **776–823** | **≈ ×7** — throughput memcpy molto più alto |
+| `maxRectPx` | 485 051 (~79%) | **487 656** (~79%) | area simile |
+
+**Esempi log scroll Test 0:**
+
+```text
+[RT] uploadDirtyRegion: calls=33 req=24.74MB reqMBps=24.09 updateMs=216.366 effMBps=114.4 maxRectPx=485051
+```
+
+**Esempi log scroll Test 6 (2026-07-14):**
+
+```text
+[RT] uploadDirtyRegion: calls=84 req=50.16MB reqMBps=49.63 updateMs=63.97 effMBps=784.1 maxRectPx=487656
+[RT] uploadDirtyRegion: calls=76 req=48.61MB reqMBps=48.10 updateMs=59.67 effMBps=814.6 maxRectPx=487656
+```
+
+**Interpretazione:**
+
+| Asse | Test 0 | Test 6 | Conclusione |
+|------|--------|--------|-------------|
+| **Velocità upload** (`effMBps`, `updateMs`) | lento (~115 MB/s eff.) | **molto più veloce** (~800 MB/s eff.) | ✅ beneficio netto Test 6 |
+| **Volume al secondo** (`reqMBps`, `calls/s`) | ~24 MB/s, 33 call/s | **~49 MB/s, 80 call/s** | Test 6 fa **più lavoro totale**/s |
+| **CPU `top` scroll** | ~30,4% | ~30,5% | simile — il risparmio per upload è **assorbito** da più frame/s + redraw PEG + sync pre-flip |
+
+> Il Test 6 **non** riduce il carico CPU in scroll perché la pipeline più veloce permette **più cicli upload/s** e copia **più byte/s**. Il guadagno si vede in **`updateMs`** (meno tempo bloccato in copia) e **`effMBps`** (memcpy 7× più efficiente), non nel `%CPU` medio di `top`. **`updateMs` Test 6 esclude `syncBackFromPeg()`** — vedi [Significato di `updateMs`](#significato-updateMs).
 
 #### G) Affinità CPU / isolcpus
 
@@ -786,12 +958,12 @@ Con `XRes=1024` `YRes=768` e `XView=1024` `YView=600`, il driver DIB16 usa pitch
 | Riga slack +1 | `peglvglwindow.cpp` | alloc `(_yres+1)` righe come path embedded legacy (`EM_YRES+1`) |
 | Race framebuffer | `peglvglwindow.cpp` | `LOCK_PEG` (`PEG_PresentationCriticalSection`) durante `blitDirtyRegion` / `syncBackFromPeg` |
 | Teardown DRM | `pegdrmoutput.cpp` | `m_alive` nel callback page_flip; `waitFlipComplete()` prima di chiudere DRM |
-| Backtrace senza core | `peg_crashdiag.cpp` | handler `SIGSEGV`/`SIGABRT`/`SIGBUS` → stack su stderr |
+| Backtrace senza core | `peg_crashdiag.cpp` | handler `SIGSEGV`/`SIGABRT`/`SIGBUS` + **`__stack_chk_fail`** → stack su stderr |
 
 **Log avvio attesi dopo deploy fix:**
 
 ```text
-[RT] crashdiag: handler SIGSEGV/SIGABRT/SIGBUS attivo (backtrace su stderr)
+[RT] crashdiag: handler SIGSEGV/SIGABRT/SIGBUS + __stack_chk_fail attivo
 [RT] drm_direct: Opzione D — output DRM dumb RGB565, SDL solo eventi
 [RT] PegLib build Jul 13 2026 12:xx:xx
 [RT] rtos.ini XRes=1024 YRes=768 → framebuffer PEG 1024x768 @ 16 bpp = 1.50 MiB, display 1024x600 = 1.17 MiB
@@ -800,7 +972,7 @@ Con `XRes=1024` `YRes=768` e `XView=1024` `YView=600`, il driver DIB16 usa pitch
 
 **Al prossimo crash:** copiare tutto da `[RT] FATAL SIGSEGV` in giù (backtrace automatico).
 
-**Stato:** ✅ risolto — `libcad2d.so` 3ª build deployata; campagna **~30 min** senza crash, **incluso aggiunta linee al grafico** (percorso `InizioSequenza` / `OnLButtonUp` / `OnPrev`→`ID_PREV`).
+**Stato:** ✅ risolto (2026-07-13) — `libcad2d.so` 3ª build deployata; campagna **~30 min** senza crash, **incluso aggiunta linee al grafico** (percorso `InizioSequenza` / `OnLButtonUp` / `OnPrev`→`ID_PREV`). Vedi [crash Calculation 2026-07-14](#test-6-crash-4) (4ª build).
 
 #### I) Varianza RT sotto stress prolungato — aggiornamento 2026-07-13 sera
 
@@ -828,6 +1000,312 @@ Misure precedenti avevano mostrato picchi fino a **~107 µs** (`bus_access≈185
 
 Verificare sempre `taskset -cp $(pidof Lnk)` → mask attesa `0x8`.
 
+**Aggiornamento sessione 2026-07-14** (pagina **Calculation** / sim2d, zoom-dezoom + bottoni grafico):
+
+| Metrica | Valore |
+|---------|--------|
+| `nanosleep` min | **11 µs** |
+| `nanosleep` max | **109 µs** |
+| Attivazioni totali | **1 068 000** |
+| Attivazioni **> 100 µs** | **3** (≈ **0,0003%**) |
+| Trigger worst case (percepito) | **dezoom** sul grafico sim2d (ridisegno pesante) |
+
+**Peggior iterazione** (CPU3, `[WORST rtc_handler_us]`, iter **866 782**):
+
+| Contatore | Valore | Confronto vs iter 105 µs (2026-07-13) |
+|-----------|--------|----------------------------------------|
+| `rtc_handler_us` | **109 µs** | +4 µs |
+| L2 miss | **29,21%** | −2,3 pp |
+| `bus_access` | 16 040 | −39% |
+| `bus_cycles` | 879 513 | simile |
+| Istruzioni | 210 404 | −68% |
+| IPC | **0,120** | **molto più basso** (0,38) |
+| CPI | **8,34** | **molto più alto** (2,65) |
+
+> Il picco **109 µs** resta **accettabile** (3 spike su 1M). L’IPC **0,12** e il CPI **8,3** sulla worst iter indicano **stall memoria/cache** durante il redraw sim2d al dezoom — coerente con carico GUI, non regressione del path DRM.
+
+#### J) Segfault pagina Calculation / sim2d (2026-07-14) — fix 4ª build `libcad2d`
+
+<a id="test-6-crash-4"></a>
+
+**Sintomo:** `SIGSEGV` durante zoom/dezoom e pressione bottoni sulla pagina **Calculation** (grafico sim2d pressa, vedi screenshot sessione).
+
+**Log stderr:**
+
+```text
+[RT] FATAL SIGSEGV (11) — backtrace (11 frame):
+/opt/Squeeze/libPegLib.so.1(+0xba780)
+linux-vdso.so.1(__kernel_rt_sigreturn+0x0)
+/opt/Squeeze/./libcad2d.so.1(+0x71ef4)
+/opt/Squeeze/./libsim2d.so.1(+0x18ad4)
+/opt/Squeeze/./libsim2d.so.1(+0x1e65c)
+/opt/Squeeze/libPegDesktop.so.1(_ZN12CDeskToolBar7MessageERK10PegMessage+0xec)
+/opt/Squeeze/libPegLib.so.1(_ZN22PegPresentationManager7ExecuteEv+0x94)
+...
+zsh: segmentation fault (core dumped)  ./PegExec
+```
+
+**Backtrace simbolizzato** (offset su `libcad2d.so.1.0.0` / `libsim2d.so` build avn8mp):
+
+```text
+CDeskToolBar::Message
+  → CSim2DFrame::Message          (IDC_PIEGA / tasto «Bend» o toolbar)
+    → CSim2DFrame::OnPiega()
+      → RefreshCad2DForOtt(iActSez)
+        → CDraftPieceWnd::RefreshView(short)   ← CRASH (+0x34 in funzione)
+```
+
+> **Percorso diverso** dai crash 2026-07-13 (`CPezzoForm::EditDraw` / `InizioSequenza` / `Pezzoview`). Qui il crash è nella **finestra CAD draft** (`CDraftPieceWnd`) aggiornata da sim2d durante **Piega**, non nel disegno diretto del grafico sim2d al dezoom. Il dezoom ha probabilmente causato il **picco RT**; il **segfault** è scattato in parallelo o subito dopo su azione **Piega** + refresh CAD.
+
+**Causa diretta:**
+
+| # | Problema | File / funzione |
+|---|----------|-----------------|
+| 1 | `RefreshView()` dereferenzia `m_pPezzoFrame` / `pDoc` **senza null-check** | `DraftPieceWnd.cpp` |
+| 2 | `InstallPagCad2D()` può restituire `NULL` → `Add(NULL)` | `DraftPieceWnd.cpp` ctor |
+| 3 | `SetGrafView()` accede a `m_pFile` / `pVista` senza guard | `PezzoDoc.cpp` |
+| 4 | `g_pDraftPieceWnd` non azzerato alla distruzione → rischio use-after-free | `StdAfx.cpp` / `DraftPieceWnd` |
+
+**Fix libcad2d (4ª iterazione — 2026-07-14):**
+
+| File | Fix |
+|------|-----|
+| `DraftPieceWnd.cpp` | Null-check su `m_pPezzoFrame`, `pForm`, `pDoc` prima di `SetGrafView` |
+| `DraftPieceWnd.cpp` | Verifica ritorno `SetGrafView != SUCCESS_PPG`; skip titolo se `m_pTitle` null |
+| `DraftPieceWnd.cpp` | `Add(m_pPezzoFrame)` solo se `InstallPagCad2D` ≠ NULL; init `m_pPezzoFrame = NULL` |
+| `DraftPieceWnd.cpp` | Distruttore `~CDraftPieceWnd()`: se `g_pDraftPieceWnd == this` → `NULL` |
+| `DraftPieceWnd.h` | Dichiarazione distruttore |
+| `PezzoDoc.cpp` | Guard `m_pFile`; null-check `pVista`; bounds `nView < 0` |
+
+```bash
+# ricompilare cad2d (4ª build), poi:
+cp libcad2d.so* /opt/Squeeze/
+md5sum /opt/Squeeze/libcad2d.so.1.0.0
+```
+
+**Test di validazione post-deploy (obbligatorio):**
+
+1. Aprire pagina **Calculation** (sim2d)
+2. Zoom / dezoom ripetuti sul grafico
+3. Durante redraw, premere **Bend**, **Simulate**, **Rotate**, navigazione toolbar
+4. Se presente finestra CAD draft (stato macchina IMP): spostarla e ripetere **Piega**
+5. Campagna **≥ 15 min** con monitor RT (`nanosleep` max, `count_ge_100`)
+
+**Stato:** ⏳ fix 5ª–7ª build in sorgente — **7ª validata** sul target (Calculate 40/40 OK, 2026-07-14).
+
+**Crash 5ª iterazione — Calculate → chiusura pagina CAD (2026-07-14):**
+
+| Campo | Dettaglio |
+|-------|-----------|
+| **Trigger** | Grafico pezzo al limite pieghe → **Calculate** → cambio pagina Sim2D |
+| **Backtrace** | `TestChiudiPagCad2D` → `CString::CString(const CString&)` |
+| **Causa** | `pDoc->m_pRecG->GetDirMatrice()` senza verificare `m_pRecG` valido |
+| **Fix** | `StdAfx.cpp`: `SetRecGrafNum`/`RecGrafPtr()` + fallback primo record grafico |
+| **Nota build** | `UpdateRecGrafPtr()` è **protected** — non chiamabile da `StdAfx.cpp` |
+
+**Crash 6ª iterazione — Calculate con 40/40 elementi (2026-07-14) — ipotesi iniziale (parziale):**
+
+| Campo | Dettaglio |
+|-------|-----------|
+| **Trigger** | Step **40/40**, errore **10008** (41ª linea rifiutata) → **Calculate** |
+| **Sintomo** | `*** stack smashing detected ***` + SIGSEGV |
+| **Ipotesi iniziale** | `LookForBends` / `prof_lin[MAX_GBEND]` — accesso oltre indice 39 |
+| **Fix 6ª rev** | `sez = min(SezioniCadGrafico, MAX_GBEND)` in catena ottimizzatore; clamp in `GetDatiOttPezzo` — **necessari ma non sufficienti** |
+
+**Crash 7ª iterazione — Calculate 40/40 — causa reale (2026-07-14) ✅ risolto:**
+
+| Campo | Dettaglio |
+|-------|-----------|
+| **Trigger** | Stesso: **40/40** pieghe → **Calculate** → apertura pagina Sim2D |
+| **Diagnostica** | Macro `CAD_DIAG` in `CommonConst.h` — log `[CAD] diag` su stderr con `fflush` |
+| **Ultima riga prima crash (6ª build)** | `[CAD] diag OnSim2DCalcola: after CalcolaNewSituaz` |
+| **Causa reale** | **`CSim2DView::PolyLinePez()`** — con 40 pieghe `i_pezzint.index_max ≈ 80` → ~**82 vertici** (profilo interno + esterno) scritti in **`pez_temp[MAX_ELEM_PERM]`** e **`rgnpez[MAX_ELEM_PERM]`** (`MAX_ELEM_PERM = MAX_GBEND×2 = **80**`, indici **0..79**) → **stack smashing** al primo redraw Sim2D |
+| **Evidenza** | `LookForBends` con `ix_org=78` coerente con `index_max=80`; `CalcolaNewSituaz` **completa** prima del crash |
+| **Fix 7ª** | `Sim2DView.cpp`: clamp `j` in `PolyLinePez`, cap `npezline`; `DisegnaPezzo`: mirror loop su `npezline` clampato; `Ottutens.cpp`: guard `MAX_POLI` in loop xmax di `LookForBends`; `Ottinit.cpp`: clamp `InitDatiSezione` (ancora aperto in 6ª) |
+| **Esito validazione** | ✅ Calculate 40/40 **senza crash** (2026-07-14) |
+
+**Log diagnostici esempio (percorso Calculate OK, 7ª build):**
+
+```text
+[CAD] diag OnCalcola: enter
+[CAD] diag OnCalcola: elem=40 graf=40 recG=39 MAX_GBEND=40
+[CAD] diag GetDatiOttPezzo: view=0 raw=40 sez=40 nElem=0
+[CAD] diag OnSim2DCalcola: InitCompilatore mod=0 iActSez=1 iNumSect=1 iActPiega=0
+[CAD] diag InitSolEsist: sez=0 nPieghe=40 passi_seq=39 offs=0 sezRaw=40
+[CAD] diag linearizza: npini=0 npieghe=40 MAX_GBEND=40
+[CAD] diag CalcolaNewSituaz: nsect=1 piega=1 passi_seq=39
+[CAD] diag LookForBends: nsect=1 piega=1 rot=-1 sez=40 start=0 ix_org=78 sezRaw=40
+[CAD] diag OnSim2DCalcola: after CalcolaNewSituaz
+[CAD] diag PolyLinePez: index_max int=80 est=80 MAX_ELEM_PERM=80
+[CAD] diag PolyLinePez: WARN clamp esterno j=80
+[CAD] diag PolyLinePez: npezline=80
+```
+
+**Punti trace `[CAD] diag`:**
+
+| Tag | File | Momento |
+|-----|------|---------|
+| `OnCalcola` | `PezzoFrame.cpp` | enter, conteggi, `GetInfoOttimizzatore`, `CHANGE_PAG` |
+| `GetInfoOtt` / `GetDatiOttPezzo` | `Ppgdoc.cpp` | export dati ottimizzatore per vista |
+| `TestChiudiPagCad2D` | `StdAfx.cpp` | chiusura pagina CAD su Calculate |
+| `OnSim2DCalcola` | `Sim2DExport.cpp` | `InitCompilatore`, `CalcolaNewSituaz` |
+| `InitCompilatore` / `InitSolEsist` / `InitDatiSez` | `Ottinit.cpp` | init sezione e pieghe |
+| `linearizza` | `Ottpunti.cpp` | `npini`, `npieghe` |
+| `LookForBends` | `Ottutens.cpp` | `ix_org`, `sez`, `passi_seq` |
+| `CalcolaNewSituaz` | `Ottcomp.cpp` | prima del redraw macchina |
+| `PolyLinePez` | `Sim2DView.cpp` | **punto critico** — `index_max` vs `MAX_ELEM_PERM` |
+
+<a id="cad-diag-build"></a>
+
+#### Diagnostica `[CAD] diag` — default off e riabilitazione build
+
+Macro definita in `pressbrakepeg/IncPPG/CommonConst.h`:
+
+```cpp
+#ifndef CAD_DIAG_CALCULATE
+#define CAD_DIAG_CALCULATE 0    // default: nessun log su stderr
+#endif
+```
+
+| Stato | Comportamento |
+|-------|----------------|
+| **`CAD_DIAG_CALCULATE=0`** (default dal 2026-07-14) | `CAD_DIAG(...)` compilato a no-op — **stderr pulito** in produzione |
+| **`CAD_DIAG_CALCULATE=1`** | ogni chiamata stampa `[CAD] diag …` su stderr con `fflush` |
+
+> **Attenzione:** con l’ottimizzatore in esecuzione (`Optimization in progress`, dialog STOP/Continue) i log possono essere **continui e molto numerosi** — l’ottimizzatore richiama in loop `CalcolaNewSituaz`, `LookForBends`, redraw Sim2D a ogni piega provata. Usare solo per debug mirato, non in campagne RT lunghe.
+
+**Per riabilitare il trace in futuro**, aggiungere `DEFINES += CAD_DIAG_CALCULATE` nei `.pro` delle **tre** librerie che contengono i punti trace (tutte includono `CommonConst.h`):
+
+| File `.pro` | Libreria output |
+|-------------|-----------------|
+| `pressbrakepeg/cad2d/cad2d.pro` | `libcad2d.so` |
+| `pressbrakepeg/sim2d/sim2d.pro` | `libsim2d.so` |
+| `pressbrakepeg/ottimizzatore/ottimizzatore.pro` | `libottimizzatore.so` |
+
+Esempio — in ciascuno dei tre `.pro`, nella sezione `DEFINES` in testa al file (accanto a `CAD2D_LIBRARY` / `SIM2D_LIBRARY` / `OTT_LIBRARY`):
+
+```qmake
+# Trace stderr percorso Calculate / ottimizzatore (debug only — molto verbose!)
+DEFINES += CAD_DIAG_CALCULATE
+```
+
+**Build e deploy dopo modifica:**
+
+```bash
+# ricompilare cad2d + sim2d + ottimizzatore (qmake/make o script build avn8mp)
+cp libcad2d.so* libsim2d.so* libottimizzatore.so* /opt/Squeeze/
+
+# verifica trace attivo:
+strings /opt/Squeeze/libsim2d.so | grep '\[CAD\] diag'
+# atteso: stringhe tipo "[CAD] diag %s: ..." nel binario
+
+# verifica trace disattivo (default):
+strings /opt/Squeeze/libsim2d.so | grep '\[CAD\] diag'
+# atteso: nessuna stringa "[CAD] diag" (macro espansa a vuoto)
+```
+
+**Alternativa senza toccare i `.pro`:** passare il define al compilatore (es. riga `QMAKE_CXXFLAGS` o variabile ambiente del build system), equivalente a:
+
+```bash
+DEFINES+=CAD_DIAG_CALCULATE
+```
+
+**Per disattivare di nuovo:** rimuovere la riga `DEFINES += CAD_DIAG_CALCULATE` dai tre `.pro` (o lasciare il default in `CommonConst.h` a `0`) e ricompilare.
+
+#### K) Ottimizzatore in esecuzione — RT sotto carico prolongato (2026-07-14)
+
+<a id="test-6-ottimizzatore-rt"></a>
+
+**Scenario:** pagina **Calculation**, dialog **«Optimization in progress»** (STOP / Continue / Simulate / Confirm), programma **362ModBisDaOtt**, **17 pieghe** (stato osservato: Bend **7/17**), Test **6** (`EMBEDDED_HMI_RT_DRM_DIRECT`), build **7ª** con fix stabilità.
+
+**Durata osservata:** **≥ 10 min** di ottimizzazione in corso, senza crash.
+
+**Metriche RT** (Lnk / PerfMonitor, CPU3 — log ogni 1000 attivazioni):
+
+| Attivazioni cumulative | `nanosleep` max | `nanosleep` min | Conteggio **> 100 µs** |
+|------------------------|----------------:|----------------:|------------------------:|
+| 72 000 | **68 µs** | 16 µs | **0** |
+| 73 000 | **68 µs** | 16 µs | **0** |
+
+```text
+Attivazioni: 72000
+valore massimo della nanosleep: 68
+valore minimo della nanosleep: 16
+i valori sopra ai 100 us: 0
+
+Attivazioni: 73000
+valore massimo della nanosleep: 68
+valore minimo della nanosleep: 16
+i valori sopra ai 100 us: 0
+```
+
+**Peggior iterazione `[WORST rtc_handler_us]`** (CPU3, stessa sessione ottimizzatore — iter **530**):
+
+| Contatore | Valore | Note |
+|-----------|--------|------|
+| `rtc_handler_us` | **68 µs** | allineato al max `nanosleep` |
+| L2 miss | **29,40%** | `l2d_cache_refill` 2412 / `l2d_cache` 8203 |
+| `bus_access` | 9 657 | |
+| `bus_cycles` | 225 507 | |
+| `cpu_cycles` | 446 436 | |
+| Istruzioni | 142 722 | |
+| IPC | **0,320** | |
+| CPI | **3,128** | |
+
+```text
+Core: CPU3
+[WORST rtc_handler_us] iter=530  rtc_handler_us=68 us
+  l2d_cache=8203  l2d_cache_refill=2412  L2 cache miss=29.4039 %
+  bus_access=9657  bus_cycles=225507
+  cpu_cycles=446436  istruzioni=142722  IPC=0.319692  CPI=3.128011
+```
+
+> Su questa worst iter il traffico bus (**9,6k** access) e l’IPC (**0,32**) sono **modesti** rispetto al picco dezoom documentato in sezione I (bus_access **16 040**, IPC **0,12**, CPI **8,34** @ 109 µs). Coerente con carico ottimizzatore **distribuito** e non burst di redraw Sim2D.
+
+**Interpretazione:**
+
+| Asse | Esito |
+|------|-------|
+| **RT** | ✅ **Eccellente** sotto ottimizzatore prolongato — max **68 µs**, ben sotto obiettivo **< 100 µs**, zero spike |
+| **Stabilità** | ✅ Nessun crash durante la sessione (Calculate + ottimizzazione in corso) |
+| **stderr** | ⚠️ Con `CAD_DIAG_CALCULATE=1` (debug crash) output **`[CAD] diag` continuo** — risolto impostando **default `0`** in `CommonConst.h` |
+
+> Confronto: worst case precedente misurato in sessione Calculation/dezoom = **109 µs** (3 spike su 1 068k). L’ottimizzatore prolongato resta **più favorevole** (68 µs max, 0 spike a 73k) — coerente con carico CPU GUI/ottimizzatore distribuito nel tempo vs burst di redraw al dezoom.
+
+```bash
+# ricompilare tutte le lib coinvolte (7ª build), poi:
+cp libcad2d.so* /opt/Squeeze/
+cp libsim2d.so* /opt/Squeeze/
+cp libottimizzatore.so* /opt/Squeeze/   # nome effettivo lib ott nel progetto
+cp libPegLib.so* /opt/Squeeze/          # se aggiornato peg_crashdiag (__stack_chk_fail)
+md5sum /opt/Squeeze/libcad2d.so.1.0.0 /opt/Squeeze/libsim2d.so.1.0.0
+strings /opt/Squeeze/libsim2d.so | grep '\[CAD\] diag'
+strings /opt/Squeeze/libPegLib.so | grep 'stack_chk_fail'
+```
+
+**Test di validazione post-deploy (obbligatorio):**
+
+1. Aprire pagina **Calculation** (sim2d)
+2. Zoom / dezoom ripetuti sul grafico
+3. Durante redraw, premere **Bend**, **Simulate**, **Rotate**, navigazione toolbar
+4. Se presente finestra CAD draft (stato macchina IMP): spostarla e ripetere **Piega**
+5. **CAD pezzo:** aggiungere linee fino a **40/40** → errore 10008 su 41ª → **Calculate** → pagina Sim2D si apre **senza crash** (7ª build)
+6. Campagna **≥ 15 min** con monitor RT (`nanosleep` max, `count_ge_100`)
+
+**Riepilogo iterazioni fix `libcad2d` / ottimizzatore (stabilità GUI):**
+
+| Build | Data | Percorso crash | File principali |
+|-------|------|----------------|-----------------|
+| 1ª | 2026-07-13 | `CPezzoForm::EditDraw` → `GetCodiceRecord` | `PezzoForm.cpp` |
+| 2ª | 2026-07-13 | Form doppia L,alpha + `RecGrafPtr` stale | `PezzoForm.cpp`, `PezzoFormLAlpha.cpp`, `Ppgdoc.cpp` |
+| 3ª | 2026-07-13 | `InizioSequenza` / mouse / `OnPrev`→`PK_F9` | `Pezzoview.cpp`, `PezzoFrame.cpp` |
+| **4ª** | **2026-07-14** | **`CDraftPieceWnd::RefreshView`** via **`OnPiega`** (sim2d) | **`DraftPieceWnd.cpp`**, **`PezzoDoc.cpp`** |
+| **5ª** | **2026-07-14** | **`TestChiudiPagCad2D`** via **Calculate** (chiusura pagina CAD) | **`StdAfx.cpp`** |
+| **6ª** | **2026-07-14** | Ipotesi **`LookForBends`** / `prof_lin` con **40/40** + Calculate | **`Ottutens.cpp`**, **`Ottinit.cpp`**, **`Ottcomp.cpp`**, **`Ppgdoc.cpp`**, **`PezzoFrame.cpp`**, **`Pezzoview.cpp`** |
+| **6ª rev** | **2026-07-14** | Clamp `SezioniCadGrafico` / `sez = min(..., MAX_GBEND)` — **necessario ma non sufficiente** | stessi file ott + `GetDatiOttPezzo` |
+| **7ª** | **2026-07-14** | **`PolyLinePez`** stack smashing — **`pez_temp[MAX_ELEM_PERM]`** con 40 pieghe (`index_max≈80`, ~82 punti) | **`Sim2DView.cpp`**, **`Ottutens.cpp`**, diagnostica **`CommonConst.h`** (`CAD_DIAG`), **`peg_crashdiag.cpp`** |
+| **8ª** | **2026-07-15** | **Freeze GUI** su chiusura Optimize **`THR_ENDSOL`/`THR_IMPOSS`** — `PpgMessageWindow` in `OnHide()` durante `Execute()` modale; trace `CAD_DIAG` | **`Ottimdlg.cpp`**, **`Sim2DFrame.cpp`**, **`ottimizzatore.pro`**, **`sim2d.pro`**, **`Ottcomp.cpp`** |
+
 **Pipeline:**
 
 ```text
@@ -835,30 +1313,159 @@ PEG RGB565 → blitDirtyRegion (memcpy) → dumb buffer back → pageFlip → di
 Touch → evdev → PEG mouse mapping
 ```
 
-### Esito attuale (2026-07-13 sera)
+#### L) Campagna stress completa — ~1h15, tutte le iterazioni grafiche pesanti (2026-07-15)
 
-> ✅ **Test 6 validato su RT, GUI e stabilità:** worst `rtc_handler_us` **105 µs**; solo **2** attivazioni > 100 µs su **432 000**; rettangoli bianchi risolti; **aggiunta linee al grafico** senza crash (`libcad2d` 3ª build già deployata durante la campagna).
+<a id="test-6-campagna-stress-1h15"></a>
+
+**Scenario:** Test **6** (`EMBEDDED_HMI_RT_DRM_DIRECT`), build **7ª**. Durata **~1 h 15 min**. Percorso utente: tutte le iterazioni grafiche più pesanti (Calculation, zoom/dezoom, navigazione pieghe, ecc.) **+** programma di **ottimizzazione pesante** in parallelo.
+
+**Metriche RT** (Lnk / PerfMonitor, CPU3 — `COM RTC Handler` / `nanosleep`):
+
+| Durata | Worst `rtc_handler_us` | Iter worst | Note |
+|--------|------------------------|------------|------|
+| **~1 h 15 min** | **99 µs** | **33 934** | Campagna stress completa — esito **eccellente** |
+
+**Peggior iterazione `[WORST rtc_handler_us]`** (CPU3, iter **33 934**):
+
+| Contatore | Valore | Note |
+|-----------|--------|------|
+| `rtc_handler_us` | **99 µs** | sotto obiettivo **< 100 µs** |
+| L2 miss | **32,22%** | `l2d_cache_refill` 6060 / `l2d_cache` 18811 |
+| `bus_access` | 24 254 | |
+| `bus_cycles` | 868 187 | |
+| `bus_access/bus_cycles` | 0,0279 | |
+| `cpu_cycles` | 1 731 532 | |
+| Istruzioni | 633 399 | |
+| IPC | **0,366** | |
+| CPI | **2,734** | |
+
+```text
+Core: CPU3
+[WORST rtc_handler_us] iter=33934  rtc_handler_us=99 us
+  l2d_cache=18811  l2d_cache_refill=6060  L2 cache miss=32.2152 %
+  bus_access=24254  bus_cycles=868187
+  cpu_cycles=1731532  istruzioni=633399  IPC=0.365803  CPI=2.733714
+```
+
+**Interpretazione:**
+
+| Asse | Esito |
+|------|-------|
+| **RT scheduler (CPU3)** | ✅ **Validato** su campagna prolungata — worst **99 µs** @ iter **33 934**, coerente con sezioni I/K |
+| **Stabilità crash** | ✅ Nessun crash durante la sessione (Calculate, redraw Sim2D, ottimizzatore) |
+| **Responsiveness GUI** | ✅ Freeze **`THR_ENDSOL`** risolto (8ª) — vedi [sezione M](#test-6-freeze-ottimizza-40-40) |
+
+> Confronto worst iter: **530** (68 µs, ottimizzatore 17 pieghe) vs **33 934** (99 µs, campagna 1h15). Il picco assoluto resta **sotto 100 µs** — obiettivo RT Test 6 **raggiunto** anche sotto stress massimo.
+
+---
+
+#### M) Freeze GUI — Optimize «Soluzione non trovata» (`THR_ENDSOL`) — **RISOLTO** (2026-07-15)
+
+<a id="test-6-freeze-ottimizza-40-40"></a>
+
+**Sintomo (bug):** dopo ottimizzazione **senza soluzione**, UI **completamente bloccata** — dialog **«Optimization in progress»**, pulsante **Optimize** premuto, touch morto. Il **scheduler RT** resta sano (non è jitter RT).
+
+**Repro originale (sessione collega, 17 pieghe):**
+
+1. Programma con **17 pieghe** → **Optimize**
+2. Ottimizzatore prova **~2 080 000+ permutazioni** (`permuta=2083000`, `passi_seq=17`) — **ore** di calcolo
+3. Esito: **`OTT_ENDSOL` (9)** / **`THR_ENDSOL` (4)** — permutazioni esaurite, nessuna soluzione
+4. Log si ferma su **`CloseDlg`** — **nessun** `OnOttimizza: OttimDlg closed` → **`Execute()` modale non ritorna**
+
+```text
+[CAD] diag MainOtt: ottimize_cycle ret=9
+[CAD] diag EseguiCalcola2: thread exit ret=4
+[CAD] diag OttimDlg: OnTimer terminal sSoluzTrovata=4
+[CAD] diag OttimDlg: CloseDlg
+→ FREEZE (stderr fermo, ^C)
+```
+
+**Repro rapido validato (4 pieghe, secondi):**
+
+1. Pezzo CAD **4 pieghe** (max **4! = 24** permutazioni)
+2. **Optimize** → messaggio UI **«Soluzione non trovata»**
+3. **Stesso percorso codice** di chiusura (`sSoluzTrovata=4`), senza ore di attesa
+
+**Root cause (build 8ª):**
+
+`COttimDlg::OnHide()` chiamava **`PpgMessageWindow()`** (seconda dialog con `Execute()`) **mentre** la dialog ottimizzazione era ancora dentro il proprio **`Execute()`** → due modali annidate → message pump bloccato → freeze.
+
+**Fix (build 8ª):**
+
+| File | Modifica |
+|------|----------|
+| **`Ottimdlg.cpp`** | `OnHide()` per **`THR_ENDSOL`/`THR_IMPOSS`**: solo log `nosoluz deferred`, **no** `PpgMessageWindow` |
+| **`Sim2DFrame.cpp`** | `OnOttimizza()` / `OttimizzaAutomatico()`: `PpgMessageWindow(IDS_OTT_NOSOLUZ)` **dopo** `pDlg->Execute()` |
+| **`Ottimdlg.cpp`**, **`Ottcomp.cpp`**, **`Sim2DFrame.cpp`** | Trace `CAD_DIAG` opzionale (`CAD_DIAG_CALCULATE=1` in `sim2d.pro` + `ottimizzatore.pro`) |
+
+**Log atteso post-fix (4 pieghe, `THR_ENDSOL`):**
+
+```text
+[CAD] diag OttimDlg: OnTimer terminal sSoluzTrovata=4
+[CAD] diag OttimDlg: CloseDlg push IDB_OK
+[CAD] diag OttimDlg: Message IDB_OK
+[CAD] diag OttimDlg: OnHide nosoluz deferred (sSoluzTrovata=4)
+[CAD] diag OnOttimizza: OttimDlg closed sSoluzTrovata=4 EXISTSOLUZ=0
+[CAD] diag OnOttimizza: PpgMessageWindow nosoluz begin
+[CAD] diag OnOttimizza: PpgMessageWindow nosoluz done
+```
+
+**Esito validazione 2026-07-15:** messaggio **«Soluzione non trovata»** visibile, UI **libera** dopo OK — **stesso percorso** del freeze collega, **fix confermato**.
+
+**Nota su repro 40/40:** il caso **40/40 + Optimize** può sembrare freeze anche **senza** bug — combinatoria enorme (`40!`), dialog modale per **ore** con `permuta` che sale. Distinto da questo bug (freeze **in chiusura** con `THR_ENDSOL` già raggiunto).
+
+**Evidenza stderr `[RT] uploadDirtyRegion` (sessione freeze originale):** spike singolo **`updateMs=797,6 ms`** (poi recupero) — contesa framebuffer→DRM sotto carico, **non** causa del freeze in chiusura dialog.
+
+**Deploy fix:**
+
+```bash
+sh scripts/build_sqvara.sh avn8mp release
+cp pressbrakepeg/out/avn8mp/release/libsim2d.so* /opt/Squeeze/
+cp pressbrakepeg/out/avn8mp/release/libottimizzatore.so* /opt/Squeeze/   # se ricompilato con CAD_DIAG
+# riavvio Enk/PegExec
+```
+
+**Produzione:** rimuovere `DEFINES += CAD_DIAG_CALCULATE` da `sim2d.pro` / `ottimizzatore.pro` quando non serve trace stderr.
+
+**Test rapido regressione freeze:**
+
+| Programma | Pieghe | Tempo atteso | Esito atteso |
+|-----------|--------|--------------|--------------|
+| CAD nuovo | **3–4** | secondi | «Soluzione non trovata» → UI OK |
+| Collega | 17 | ore (se no soluzione) | stesso messaggio + UI OK post-fix |
+
+---
+
+### Esito attuale (2026-07-15)
+
+> ✅ **Test 6 — RT:** worst `rtc_handler_us` **99 µs** @ iter **33 934** su campagna **~1h15** (stress grafico + ottimizzazione pesante) — vedi [sezione L](#test-6-campagna-stress-1h15). Sessioni precedenti: **109 µs** (dezoom, 1 068k att.), **68 µs** (ottimizzatore 17 pieghe, 73k att.) — [sezione K](#test-6-ottimizzatore-rt).
+>
+> ✅ **Test 6 — Stabilità crash:** **Calculate 40/40** risolto con **7ª build** (`PolyLinePez`); campagna 1h15 **senza crash**.
+>
+> ✅ **Test 6 — Responsiveness:** freeze su **Optimize / `THR_ENDSOL`** risolto con **8ª build** — vedi [sezione M](#test-6-freeze-ottimizza-40-40); validazione rapida **4 pieghe** OK (2026-07-15).
 
 | Asse | Esito attuale Test 6 |
 |------|----------------------|
-| **RT** | ✅ worst **105 µs** · `count_ge_100` = **2**/432k · IPC worst **0,38** · L2 miss worst **31,6%** |
-| **GUI** | ✅ touch OK · ✅ linee orizzontali risolte · ✅ rettangoli bianchi assenti · scroll pesante `updateMs` 61–70 ms |
-| **CPU** | ✅ idle PegExec **4%** / Lnk **19%** · stress PegExec **30,5%** / Lnk **22%** |
-| **Stabilità** | ✅ **~30 min** senza crash · scroll · navigazione · **edit linee grafico** (`Pezzoview` + `PezzoFrame`) |
+| **RT** | ✅ worst **99 µs** (campagna 1h15, iter 33 934) · **68 µs** (ottimizzatore 17 pieghe) · **109 µs** (dezoom) · tutti **< 100 µs** o entro margine misura |
+| **GUI rendering** | ✅ touch OK · ✅ linee orizzontali risolte · ✅ rettangoli bianchi assenti |
+| **GUI liveness** | ✅ Freeze **`THR_ENDSOL`** risolto (8ª, 2026-07-15) |
+| **CPU** | ✅ idle PegExec **4%** / Lnk **19%** (2026-07-13) · stress PegExec **30,5%** · ottimizzatore PegExec **~60%** + SqServerd **~47%** (17 pieghe) |
+| **Stabilità crash** | ✅ **Calculate 40/40** + campagna **~1h15** (7ª build, 2026-07-15) |
 
-**Stato codice:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` su branch `experiment/test6-drm` (`PegLib`); fix stabilità in `pressbrakepeg/cad2d/` (`PezzoForm`, `PezzoFormLAlpha`, `Pezzoview`, `PezzoFrame`).
+**Stato codice:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` su branch `experiment/test6-drm` (`PegLib`); fix stabilità **cad2d/ottimizzatore** (1–7ª) + **sim2d** freeze Optimize (**8ª**: `Ottimdlg.cpp`, `Sim2DFrame.cpp`).
 
 **Prossimi passi:**
 
-1. ✅ Campagna **~30 min** con `libcad2d` 3ª build — zero segfault (scroll, navigazione, **aggiunta linee**)
-2. **Promuovere Test 6 a produzione** — merge `experiment/test6-drm` → main, deploy `libPegLib.so` + `libcad2d.so` + `PegExec`
-3. Opzionale: campagna estesa **60 min** per margine documentale
-4. Pin permanente `Lnk` su CPU3 (`taskset -cp 3 $(pidof Lnk)`)
+1. **Campagna finale** tasti/toolbar post-fix (in corso utente, 2026-07-15)
+2. **Promuovere Test 6 a produzione** (merge `experiment/test6-drm` → main; deploy `libPegLib.so` + `libcad2d.so` + `libsim2d.so` + lib ottimizzatore + `PegExec`)
+3. Rimuovere `CAD_DIAG_CALCULATE` dai `.pro` per build produzione (stderr pulito)
+4. Opzionale RT: **istogramma** ritardi 50–120 µs (70 bin) in Lnk/PerfMonitor per grafico distribuzione
+5. Pin permanente `Lnk` su CPU3 (`taskset -cp 3 $(pidof Lnk)`)
 
 **Verifica deploy (atteso in avvio):**
 
 ```text
-[RT] crashdiag: handler SIGSEGV/SIGABRT/SIGBUS attivo (backtrace su stderr)
+[RT] crashdiag: handler SIGSEGV/SIGABRT/SIGBUS + __stack_chk_fail attivo
 [RT] drm_direct: Opzione D — output DRM dumb RGB565, SDL solo eventi
 [RT] PegLib build … …
 [RT] rtos.ini XRes=1024 YRes=768 → framebuffer PEG 1024x768 … display 1024x600 …
@@ -943,6 +1550,8 @@ framebuffer PEG (RAM) → SDL_LockTexture() → memcpy → SDL_UnlockTexture() �
 ```
 
 La texture resta `SDL_TEXTUREACCESS_STREAMING` (già così in Test 0); cambia solo il modo di caricare i pixel dirty.
+
+> **`updateMs` in questo test:** tempo cumulato in **`SDL_LockTexture()`** + `memcpy` + **`SDL_UnlockTexture()`** (al posto di `SDL_UpdateTexture`). Present SDL fuori metrica — come Test 0.
 
 ### Modifica codice
 
@@ -1328,8 +1937,10 @@ ForceBPP=True   ; obbligatorio: forza il valore da ini
 
 ## Note operative
 
-- **Deploy:** copiare sempre `libPegLib.so*`, `PegExec` **e** `rtos.ini` aggiornato in `/opt/Squeeze/`
-- **Verifica build:** `strings libPegLib.so | grep -E 'crashdiag|PegLib build|framebuffer PEG'`
+- **Deploy:** copiare sempre `libPegLib.so*`, `PegExec`, **`libcad2d.so*`**, **`libsim2d.so*`**, lib ottimizzatore **e** `rtos.ini` aggiornato in `/opt/Squeeze/`
+- **Verifica build:** `strings libPegLib.so | grep -E 'crashdiag|stack_chk_fail|PegLib build|framebuffer PEG'` · `md5sum /opt/Squeeze/libcad2d.so.1.0.0`
+- **Trace `[CAD] diag`:** default **off** — vedi [Diagnostica CAD_DIAG](#cad-diag-build). Con trace off: `strings libsim2d.so | grep '\[CAD\] diag'` → **nessun output**
+- **Crash Calculate (debug):** riabilitare `DEFINES += CAD_DIAG_CALCULATE` nei tre `.pro` (cad2d, sim2d, ottimizzatore); ultima riga `[CAD] diag` prima del fault indica il punto
 - **Crash:** se `core` assente, usare backtrace `[RT] FATAL` su stderr oppure `coredumpctl gdb PegExec`
 - **Avvio RT:** non avviare Lnk subito dopo PegExec — attendere **≥ 30 s** (vedi protocollo sopra)
 - **Trappola:** log `[RT]` visibili con `.so` vecchio anche se macro commentata → verificare con `strings`
