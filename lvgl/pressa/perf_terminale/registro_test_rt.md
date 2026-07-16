@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-15** (RT campagna 1h15 **99 µs** · freeze Optimize **`THR_ENDSOL`** **risolto** build **8ª** · validazione 4 pieghe)
+> Ultimo aggiornamento: **2026-07-15** (RT campagna **4 h** **102 µs** · **1** spike / **4,15 M** att. · **0 crash** · build **8ª**)
 
 ---
 
@@ -231,12 +231,12 @@ Se il proxy scheduler resta < 100 µs e in futuro un worker mostrasse spike isol
 | **4** | Riduzione risoluzione **800×600** (Opzione 1) | ✅ GUI −27…45% · RT **97 µs** (−20%) | [→ TEST 4](#test-4) |
 | **5** | Diagnosi formato texture SDL (Opzione A) | ✅ Diagnosi mismatch RGB565 · nessun fix runtime | [→ TEST 5](#test-5) |
 | **5b** | Texture ARGB8888 nativa + conversione esplicita | ✅ GUI +150% · ❌ RT **191 µs** → **rollback** | [→ TEST 5b](#test-5b) |
-| **6** | DRM dumb buffer RGB565 (Opzione D POC) | ✅ RT · ✅ GUI · ✅ stabilità **7ª build** (Calculate 40/40 OK, 2026-07-14) | [→ TEST 6](#test-6) |
+| **6** | DRM dumb buffer RGB565 (Opzione D POC) | ✅ RT · ✅ GUI · ✅ stabilità **8ª build** · campagna **4 h** **0 crash** (2026-07-15) | [→ TEST 6](#test-6) |
 | **B** | `SDL_LockTexture` streaming (Opzione B) | ❌ ≈ Test 0 · **rollback** | [→ TEST B](#test-b) |
 | **DCC** | Framebuffer Compression / Prefetch (fase 0) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ TEST DCC](#test-dcc) |
 | **7** | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ TEST 7](#test-7) |
 
-**Produzione attuale:** Test **6** su branch `experiment/test6-drm` — RT/GUI OK; stabilità **validata** (build **7ª** `libcad2d` + `libsim2d` + `libottimizzatore`, Calculate 40/40). Test **0** resta fallback noto.
+**Produzione attuale:** Test **6** su branch `experiment/test6-drm` — RT/GUI OK; stabilità **validata** (build **8ª**, campagna **4 h** senza crash, **1** spike RT / **4,15 M** att.). Test **0** resta fallback noto.
 
 ### Prossimi test
 
@@ -754,6 +754,7 @@ Contesto ripresa su branch `experiment/test6-drm`, config produzione `XRes=1024 
 | Stress test “grafico colorato” (punto critico) | **99 µs** ✅ |
 | Stress prolungato (2026-07-13 pomeriggio) | **102 µs** worst |
 | **Campagna ~30 min** (scroll grafico + navigazione, 2026-07-13 sera) | **105 µs** worst · `count_ge_100` = **2** / **432 000** attivazioni |
+| **Campagna endurance ~4 h** (2026-07-15, build **8ª**) | **102 µs** worst · `count_ge_100` = **1** / **~4 152 000** attivazioni · **0 crash** |
 | **Sessione Calculation** (zoom/dezoom sim2d, 2026-07-14) | **109 µs** worst · `count_ge_100` = **3** / **1 068 000** attivazioni |
 
 > `ps` mostrava `Lnk` non pinnato (migrava tra CPU 1/2). Pin esplicito consigliato per misure RT stabili.
@@ -1436,31 +1437,82 @@ cp pressbrakepeg/out/avn8mp/release/libottimizzatore.so* /opt/Squeeze/   # se ri
 
 ---
 
+#### N) Campagna endurance — **~4 h**, **0 crash** (2026-07-15)
+
+<a id="test-6-campagna-endurance-4h"></a>
+
+**Scenario:** Test **6** (`EMBEDDED_HMI_RT_DRM_DIRECT`), build **8ª** (fix freeze **`THR_ENDSOL`** + stack stabilità **7ª**). Durata **~4 ore** continue. Uso operativo esteso su GUI (navigazione, grafici, interazione touch) — **nessun crash** per tutta la sessione.
+
+**Metriche RT** (Lnk / PerfMonitor, CPU3 — `COM RTC Handler` / `nanosleep`):
+
+| Durata | Attivazioni | `nanosleep` min | `nanosleep` max | Spike **> 100 µs** | Crash |
+|--------|------------:|----------------:|----------------:|-------------------:|-------|
+| **~4 h** | **~4 152 000** | **11 µs** | **102 µs** | **1** (≈ **0,000024%**) | **0** |
+
+```text
+valore massimo della nanosleep delle ultime 4152000 attivazioni vale = 102
+valore minimo della nanosleep delle ultime 4152000 attivazioni vale = 11
+i valori sopra ai 100 us nelle ultime 4152000 attivazioni sono = 1
+```
+
+**Peggior iterazione `[WORST rtc_handler_us]`** (CPU3, iter **14 685**):
+
+| Contatore | Valore | Confronto vs campagna 1h15 (iter 33 934, 99 µs) |
+|-----------|--------|--------------------------------------------------|
+| `rtc_handler_us` | **102 µs** | +3 µs (entro rumore di misura) |
+| L2 miss | **31,59%** | simile (32,22%) |
+| `bus_access` | 36 006 | +48% |
+| `bus_cycles` | 1 079 083 | +24% |
+| `cpu_cycles` | 2 153 619 | +24% |
+| Istruzioni | 710 627 | +12% |
+| IPC | **0,330** | simile (0,366) |
+| CPI | **3,031** | simile (2,734) |
+
+```text
+Core: CPU3
+[WORST rtc_handler_us] iter=14685  rtc_handler_us=102 us
+  l2d_cache=28434  l2d_cache_refill=8982  L2 cache miss=31.5889 %
+  bus_access=36006  bus_cycles=1079083
+  bus_access/bus_cycles=0.033367  bus_cycles/bus_access=29.9695
+  cpu_cycles=2153619  istruzioni=710627  IPC=0.329969  CPI=3.030590
+```
+
+**Interpretazione:**
+
+| Asse | Esito |
+|------|-------|
+| **RT scheduler (CPU3)** | ✅ **Eccellente** su **4 h** — worst **102 µs**, **1 solo spike** > 100 µs su **4,15 M** attivazioni |
+| **Stabilità** | ✅ **0 crash** — validazione endurance post build **8ª** |
+| **Confronto 1h15** | Worst **99 µs** → **102 µs** (+3 µs); spike **2** / 432k → **1** / 4,15M — **distribuzione RT migliore** su run lungo |
+
+> Il picco **102 µs** resta **accettabile** per produzione (obiettivo < 100 µs con margine spike raro). Su **4,15 M** attivazioni un solo valore > 100 µs (**0,000024%**) conferma che Test 6 **non degrada** la catena RT sotto carico prolongato.
+
+---
+
 ### Esito attuale (2026-07-15)
 
-> ✅ **Test 6 — RT:** worst `rtc_handler_us` **99 µs** @ iter **33 934** su campagna **~1h15** (stress grafico + ottimizzazione pesante) — vedi [sezione L](#test-6-campagna-stress-1h15). Sessioni precedenti: **109 µs** (dezoom, 1 068k att.), **68 µs** (ottimizzatore 17 pieghe, 73k att.) — [sezione K](#test-6-ottimizzatore-rt).
+> ✅ **Test 6 — RT:** campagna endurance **~4 h** — worst **102 µs** @ iter **14 685**, **1** spike > 100 µs su **~4,15 M** attivazioni — vedi [sezione N](#test-6-campagna-endurance-4h). Sessioni precedenti: **99 µs** (1h15, iter 33 934), **109 µs** (dezoom), **68 µs** (ottimizzatore 17 pieghe).
 >
-> ✅ **Test 6 — Stabilità crash:** **Calculate 40/40** risolto con **7ª build** (`PolyLinePez`); campagna 1h15 **senza crash**.
+> ✅ **Test 6 — Stabilità crash:** **0 crash** su **4 h** (build **8ª**); **Calculate 40/40** risolto con **7ª build** (`PolyLinePez`).
 >
 > ✅ **Test 6 — Responsiveness:** freeze su **Optimize / `THR_ENDSOL`** risolto con **8ª build** — vedi [sezione M](#test-6-freeze-ottimizza-40-40); validazione rapida **4 pieghe** OK (2026-07-15).
 
 | Asse | Esito attuale Test 6 |
 |------|----------------------|
-| **RT** | ✅ worst **99 µs** (campagna 1h15, iter 33 934) · **68 µs** (ottimizzatore 17 pieghe) · **109 µs** (dezoom) · tutti **< 100 µs** o entro margine misura |
+| **RT** | ✅ worst **102 µs** (4 h, iter 14 685) · **1** spike / **4,15 M** att. · **99 µs** (1h15) · **68 µs** (ottimizzatore) · **109 µs** (dezoom) |
 | **GUI rendering** | ✅ touch OK · ✅ linee orizzontali risolte · ✅ rettangoli bianchi assenti |
 | **GUI liveness** | ✅ Freeze **`THR_ENDSOL`** risolto (8ª, 2026-07-15) |
 | **CPU** | ✅ idle PegExec **4%** / Lnk **19%** (2026-07-13) · stress PegExec **30,5%** · ottimizzatore PegExec **~60%** + SqServerd **~47%** (17 pieghe) |
-| **Stabilità crash** | ✅ **Calculate 40/40** + campagna **~1h15** (7ª build, 2026-07-15) |
+| **Stabilità crash** | ✅ **0 crash** su campagna **~4 h** (8ª, 2026-07-15) · **Calculate 40/40** (7ª) |
 
 **Stato codice:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` su branch `experiment/test6-drm` (`PegLib`); fix stabilità **cad2d/ottimizzatore** (1–7ª) + **sim2d** freeze Optimize (**8ª**: `Ottimdlg.cpp`, `Sim2DFrame.cpp`).
 
 **Prossimi passi:**
 
-1. **Campagna finale** tasti/toolbar post-fix (in corso utente, 2026-07-15)
-2. **Promuovere Test 6 a produzione** (merge `experiment/test6-drm` → main; deploy `libPegLib.so` + `libcad2d.so` + `libsim2d.so` + lib ottimizzatore + `PegExec`)
-3. Rimuovere `CAD_DIAG_CALCULATE` dai `.pro` per build produzione (stderr pulito)
-4. Opzionale RT: **istogramma** ritardi 50–120 µs (70 bin) in Lnk/PerfMonitor per grafico distribuzione
-5. Pin permanente `Lnk` su CPU3 (`taskset -cp 3 $(pidof Lnk)`)
+1. **Promuovere Test 6 a produzione** (merge `experiment/test6-drm` → main; deploy `libPegLib.so` + `libcad2d.so` + `libsim2d.so` + lib ottimizzatore + `PegExec`)
+2. Rimuovere `CAD_DIAG_CALCULATE` dai `.pro` per build produzione (stderr pulito)
+3. Opzionale RT: **istogramma** ritardi 50–120 µs (70 bin) in Lnk/PerfMonitor per grafico distribuzione
+4. Pin permanente `Lnk` su CPU3 (`taskset -cp 3 $(pidof Lnk)`)
 
 **Verifica deploy (atteso in avvio):**
 
@@ -1946,6 +1998,37 @@ ForceBPP=True   ; obbligatorio: forza il valore da ini
 - **Trappola:** log `[RT]` visibili con `.so` vecchio anche se macro commentata → verificare con `strings`
 - **Diagnosi SDL:** `strings libPegLib.so | grep '\[RT\] diag'` — se assente, macro `EMBEDDED_HMI_RT_DIAG` non compilata
 - **LVGL:** irrilevante per il percorso display; non ottimizzare cache LVGL per questo problema
+
+---
+
+## O — Experiment font #2 (pulizia PegFontChs, 2026-07-16)
+
+**Branch:** `experiment/test6-with-new-font` in **kvuib** (twin di pegenstein).  
+**Obiettivo:** togliere bitmap Yahei **embedded** ridondanti (`Yahei_N.cpp`) dalle `libPegFontChs*`: a runtime `YAHEI_CHS_*` carica già `PegFontTypeYaHeiN.gz` / `_CS.gz` (`PegDeskFontChs*.cpp`).
+
+**Cosa non toccato (ancora referenziato):** `MSSong_*`, `Yahei_*_Light` (call site attivi in Desktop / UimMsgDialog / pressbrakepeg con `bYaweiUI`).
+
+**Modifica:** commento + rimozione `Yahei_N.cpp` da:
+`PegFontChs{8,9,10,11,12,14,16}.pro`
+
+**Misura SO (avn8mp Release), prima → dopo:**
+
+| Lib | Prima | Dopo | Risparmio |
+|-----|------:|------:|----------:|
+| Chs8 | 1488 KB | 973 KB | 515 KB |
+| Chs9 | 1617 KB | 1037 KB | 579 KB |
+| Chs10 | 1938 KB | 1294 KB | 643 KB |
+| Chs11 | 2387 KB | 1551 KB | 836 KB |
+| Chs12 | 2643 KB | 1678 KB | 964 KB |
+| Chs14 | 3669 KB | 2385 KB | 1285 KB |
+| Chs16 | 4503 KB | 2898 KB | 1605 KB |
+| **Totale** | **~17.8 MB** | **~11.5 MB** | **~6.3 MB** |
+
+**Audit Arial (solo documentazione, nessun prune):** taglie definite ma senza `DeskGetFont`/`DeskGetBaseFont` nel tree pressbrakepeg+kvuib: `ARIAL_6`, `ARIAL_6G`, `ARIAL_10CB/GB/GCB`, `ARIAL_10CS/GS/GCS`, `ARIAL_40`. Il resto delle ARIAL_* risulta usato.
+
+**Prossimi passi possibili:** subset Unicode (#3) / SKU EU slim (#1) / valutare redirect Light→Yahei.gz se si accetta look diverso.
+
+**Stato:** fatto su branch experiment; redeploy `libPegFontChs*.so` + smoke UI CHS (Yahei da `.gz`) e EU.
 
 ---
 
