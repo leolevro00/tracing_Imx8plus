@@ -2003,32 +2003,143 @@ ForceBPP=True   ; obbligatorio: forza il valore da ini
 
 ## O — Experiment font #2 (pulizia PegFontChs, 2026-07-16)
 
-**Branch:** `experiment/test6-with-new-font` in **kvuib** (twin di pegenstein).  
-**Obiettivo:** togliere bitmap Yahei **embedded** ridondanti (`Yahei_N.cpp`) dalle `libPegFontChs*`: a runtime `YAHEI_CHS_*` carica già `PegFontTypeYaHeiN.gz` / `_CS.gz` (`PegDeskFontChs*.cpp`).
+### Quale delle 3 ha più senso
 
-**Cosa non toccato (ancora referenziato):** `MSSong_*`, `Yahei_*_Light` (call site attivi in Desktop / UimMsgDialog / pressbrakepeg con `bYaweiUI`).
+**Consiglio: #2 — multilingua + pulizia build.**
 
-**Modifica:** commento + rimozione `Yahei_N.cpp` da:
-`PegFontChs{8,9,10,11,12,14,16}.pro`
+| Opzione | Perché sì / no ora |
+|---------|--------------------|
+| **#1 EU slim** | Risparmio massimo e immediato, ma spegne CHS/KOR/JAP sull'immagine. Ha senso solo se Test 6 resta EU-only. Per una pressa multilingua è troppo aggressivo come primo passo. |
+| **#2 pulizia** | **Scelta migliore ora.** Look invariato, lingue intatte, risparmio su flash togliendo ridondanze (Yahei embedded dove il runtime usa `.gz`; MSSong/Light lasciati se ancora referenziati). Misurabile e reversibile. |
+| **#3 subset** | Massimo guadagno a lungo termine, ma serve PEG Font Capture (non nel tree) + charset dalle stringhe. Prepararlo dopo #2, non come primo commit. |
+
+**Ordine pratico:** #2 subito → charset/script per #3 dopo → #1 solo se serve un'immagine lab EU-only.
+
+---
+
+### Cos’è il problema delle “ridondanze” (prima)
+
+Per il **cinese (CHS)** l’immagine poteva contenere **due copie** dello stesso font Yahei:
+
+1. **Dentro la libreria** `libPegFontChsN.so` — glifi compilati da file C enormi tipo `Yahei_12.cpp` (centinaia di KB / ~1 MB di bitmap per taglia).
+2. **Su disco come file esterno** — `PegFontTypeYaHei12.gz` (e, se ClearStripe, `PegFontTypeYaHei12_CS.gz`).
+
+A runtime, però, `DeskGetFont(YAHEI_CHS_12)` **non usava mai** i glifi dentro la `.so`. In `PegDeskFontChs12.cpp` il percorso è:
+
+- punta a uno **stub vuoto** `static PegFont Yahei12 = {0}` (non ai dati di `Yahei_12.cpp`);
+- se `uHeight == 0`, chiama `pegLoadBinFont(...)` e carica i glifi dal **`.gz`**.
+
+Quindi: **stesso font “pieno” presente due volte sull’immagine, ma solo il `.gz` veniva usato.**  
+I `Yahei_8.cpp` … `Yahei_16.cpp` linkati nelle `.so` erano **peso morto**: occupavano **flash**, non servivano al path normale di `YAHEI_CHS_*`.
+
+Nella stessa lib c’erano anche altre cose **non** morte:
+
+| Contenuto | Usato a runtime? | Azione #2 |
+|-----------|------------------|-----------|
+| `Yahei_N.cpp` (embedded) | No — path usa `.gz` | **Rimosso** dalla build |
+| `PegFontTypeYaHeiN.gz` | Sì — path CHS normale | Lasciato (serve) |
+| `MSSong_N` | Sì — alcuni dialoghi | Lasciato |
+| `Yahei_N_Light` | Sì — alcuni path (`bYaweiUI`, allarmi, …) | Lasciato |
+
+```text
+PRIMA (ridondanza)
+  libPegFontChs12.so  =  MSSong + Yahei_embedded (MORTO) + Yahei_Light + loader
+  disco               =  PegFontTypeYaHei12.gz   ← questo sì, usato a runtime
+
+DOPO (#2)
+  libPegFontChs12.so  =  MSSong + Yahei_Light + loader
+  disco               =  PegFontTypeYaHei12.gz   ← invariato, ancora usato
+```
+
+**Nota RAM:** togliere codice mai referenziato riduce soprattutto lo **spazio flash** (~6.3 MB sulle Chs). La RAM “viva” del path CHS resta quella del load dal `.gz` (invariata). Su Linux le pagine della `.so` mai toccate spesso non entravano comunque in RAM fisica.
+
+---
+
+### Cosa abbiamo fatto concretamente (#2)
+
+**Branch:** `experiment/test6-with-new-font` in **kvuib** (twin di pegenstein).
+
+**Modifica:** da `PegFontChs{8,9,10,11,12,14,16}.pro` rimossi i `SOURCES` `Yahei_N.cpp` (con commento che spiega il load da `.gz`).  
+`PegFontChs18` era già solo-loader (niente embedded da togliere).
+
+**Effetto:** look e lingue invariati (CHS via `.gz`, EU/Arial non toccati); `.so` più piccole.
 
 **Misura SO (avn8mp Release), prima → dopo:**
 
-| Lib | Prima | Dopo | Risparmio |
-|-----|------:|------:|----------:|
-| Chs8 | 1488 KB | 973 KB | 515 KB |
-| Chs9 | 1617 KB | 1037 KB | 579 KB |
-| Chs10 | 1938 KB | 1294 KB | 643 KB |
-| Chs11 | 2387 KB | 1551 KB | 836 KB |
-| Chs12 | 2643 KB | 1678 KB | 964 KB |
-| Chs14 | 3669 KB | 2385 KB | 1285 KB |
-| Chs16 | 4503 KB | 2898 KB | 1605 KB |
-| **Totale** | **~17.8 MB** | **~11.5 MB** | **~6.3 MB** |
+| Lib | Prima (byte) | Dopo (byte) | Risparmio (byte) | Risparmio |
+|-----|-------------:|------------:|-----------------:|----------:|
+| Chs8 | 1 524 064 | 996 288 | 527 776 | 515.4 KB |
+| Chs9 | 1 655 496 | 1 062 000 | 593 496 | 579.6 KB |
+| Chs10 | 1 984 088 | 1 324 832 | 659 256 | 643.8 KB |
+| Chs11 | 2 444 304 | 1 587 896 | 856 408 | 836.3 KB |
+| Chs12 | 2 706 808 | 1 719 168 | 987 640 | 964.5 KB |
+| Chs14 | 3 757 928 | 2 441 904 | 1 316 024 | 1285.2 KB |
+| Chs16 | 4 611 360 | 2 967 112 | 1 644 248 | 1605.7 KB |
+| **Totale 7 lib** | **18 684 048** | **12 099 200** | **6 584 848** | **6.28 MB** |
+
+*(Prima = size `.so.1.0.0` prima del relink; Dopo = size dopo rebuild senza `Yahei_N.cpp`, copiate anche in `pressbrakepeg-output/.../opt/Squeeze/`.)*
+
+---
+
+### Memoria effettiva nel caso specifico — cosa contare
+
+Distinguere **tre cose diverse** (altrimenti i numeri si confondono):
+
+#### 1) Flash / spazio immagine (quello che #2 ha ridotto)
+
+| Voce | Prima | Dopo | Delta |
+|------|------:|-----:|------:|
+| Somma `libPegFontChs{8,9,10,11,12,14,16}.so` | **17.818 MB** (18 684 048 B) | **11.539 MB** (12 099 200 B) | **−6.280 MB** (−6 584 848 B) |
+
+Questo è il **risparmio reale e misurato** di #2: meno byte sul filesystem dell’immagine.
+
+**Non ridotti da #2** (ancora sull’immagine `opt/Squeeze`, misura post-#2):
+
+| Voce | Size |
+|------|-----:|
+| Tutte le `libPegFont*.so.1.0.0` (base + Chs + Kor + Jap + Rus + Gre + LatinExt) | **~26.00 MB** |
+| Solo Yahei `.gz` standard (`PegFontTypeYaHei*.gz` senza `_CS`) | **~4.39 MB** |
+| Solo Yahei `.gz` ClearStripe (`*_CS.gz`) | **~20.01 MB** |
+| Tutti Yahei `.gz` (standard + CS) | **~24.39 MB** |
+
+I `.gz` **devono** restare: sono la copia **usata** a runtime per `YAHEI_CHS_*`. #2 ha tolto solo il duplicato morto **dentro** le `.so`.
+
+#### 2) RAM processo HMI (RSS) — #2 quasi non cambia
+
+- I `Yahei_N.cpp` erano **mai referenziati** → su Linux spesso **non entravano in RAM fisica** (demand paging: pagine della `.so` non toccate = non faultate).
+- Il path CHS continua a fare `pegLoadBinFont` dal `.gz` → quel costo RAM **è invariato**.
+- Quindi: **non dichiarare “abbiamo liberato 6.3 MB di RAM”**. Abbiamo liberato **6.3 MB di flash** sulle Chs.
+
+#### 3) “Caso specifico” tipico pressa
+
+| Scenario lingua | Cosa pesa davvero | Effetto #2 |
+|-----------------|-------------------|------------|
+| **EU / ITA** (Arial) | `libPegFont.so` (~662 KB) + eventualmente LatinExt; lib Chs spesso caricate solo se serve CHS | Flash immagine più leggera; RSS EU tipicamente **uguale** |
+| **CHS** | `.gz` Yahei della taglia usata (es. 12 ≈ **522 KB** standard / **~2.4 MB** CS) decompresso/caricato + lib Chs (MSSong + Light ancora dentro) | Flash −6.3 MB sulle Chs; RAM load Yahei **uguale** |
+
+**Come verificarlo sul target (consigliato):**
+
+```bash
+# Flash: size file dopo deploy
+ls -l /opt/Squeeze/libPegFontChs*.so.1.0.0
+
+# RAM: confrontare RES/PSS del processo PRIMA vs DOPO deploy (stessa lingua/scenario)
+# es. smem -P PegExec   oppure   ps -o rss= -p $(pidof PegExec)
+```
+
+**In una frase per il professore / checklist:**  
+controllata la memoria font nel caso specifico → **flash Chs 17.82 → 11.54 MB (−6.28 MB)**; **RAM runtime del path Yahei invariata** perché i glifi usati restano quelli del `.gz`.
+
+---
+
+**In una frase (tecnica):** prima Yahei “pieno” sia nella `.so` sia nel `.gz`, ma a runtime solo il `.gz` → ridondanza su flash; #2 toglie dalla build la copia morta nella `.so`.
 
 **Audit Arial (solo documentazione, nessun prune):** taglie definite ma senza `DeskGetFont`/`DeskGetBaseFont` nel tree pressbrakepeg+kvuib: `ARIAL_6`, `ARIAL_6G`, `ARIAL_10CB/GB/GCB`, `ARIAL_10CS/GS/GCS`, `ARIAL_40`. Il resto delle ARIAL_* risulta usato.
 
 **Prossimi passi possibili:** subset Unicode (#3) / SKU EU slim (#1) / valutare redirect Light→Yahei.gz se si accetta look diverso.
 
-**Stato:** fatto su branch experiment; redeploy `libPegFontChs*.so` + smoke UI CHS (Yahei da `.gz`) e EU.
+**Stato:** fatto su branch experiment; redeploy `libPegFontChs*.so` + smoke UI CHS (Yahei da `.gz`) e EU.  
+**Rollback:** `git switch` al branch precedente in kvuib → ricompilare Chs → redeploy `.so` vecchie.
 
 ---
 
