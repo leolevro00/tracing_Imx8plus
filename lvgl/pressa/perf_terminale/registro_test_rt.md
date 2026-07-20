@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-20** (fix multitouch Die Set / freeze CAD; audit PegBitmap §4; **Possibili migliorie**; experiment font #2; RT campagna **4 h** del 2026-07-15 invariata)
+> Ultimo aggiornamento: **2026-07-20** (banda DDR `perf` riposo vs scroll; fix multitouch Die Set; audit PegBitmap §4; **Possibili migliorie**; font #2; RT **4 h** 2026-07-15)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -12,8 +12,9 @@
 | `analisi_metriche_gui_rt.md` | Significato di `calls`, `reqMBps`, `effMBps`, `maxRectPx`; **`updateMs` per test** → [sezione dedicata](#significato-updateMs) in questo registro |
 | `interferenza_cpu_ddr_idle_vs_interazione.md` | Argomento CPU/DDR vs GPU per la tesi |
 | `riduzione_framebuffer_esperimenti.md` | Opzioni A–E (formato texture, LockTexture, DRM diretto, …) |
-| `osservazioni` / `test-perf` | Note raw su `perf stat`, `htop`, `gc/meminfo` |
+| `osservazioni` / `test-perf` / `valori_perf.txt` | Note raw `perf` / `htop`; dump DDR cycles → [banda MB/s](#banda-ddr-perf) |
 | [DIAGNOSTICA TEST 6](#diagnostica-test-6) | **In questo file** — come attivare/disattivare ogni macro di trace (`[CAD]`, `[RT]`, crash) |
+| [Banda DDR da `perf`](#banda-ddr-perf) | **In questo file** — metriche `read/write-cycles`, formula MB/s, riposo vs scroll |
 
 ---
 
@@ -930,6 +931,92 @@ Esempi log (scroll leggero):
 ```
 
 GPU non usata (`gc/meminfo` stabile); carico su CPU memcpy + pageflip DRM.
+
+<a id="banda-ddr-perf"></a>
+
+#### E2) Banda DDR da `perf` — riposo vs scroll grafico (2026-07-20)
+
+Misura **sistemica** del traffico memoria DDR (tutti i master: CPU, LCDIF/scanout, GPU, …), complementare a `reqMBps` / `effMBps` di `uploadDirtyRegion` (che contano solo la copia GUI PEG→DRM).
+
+##### Comando
+
+```bash
+perf stat -a -I 100 \
+  -e imx8_ddr0/read-cycles/,imx8_ddr0/write-cycles/ \
+  sleep 10 > /tmp/valori_perf.txt
+```
+
+| Opzione | Ruolo |
+|---------|--------|
+| `-a` | tutto il sistema (non un solo processo) |
+| `-I 100` | campione ogni **100 ms** |
+| `read-cycles` / `write-cycles` | cicli in cui il controller DDR è occupato in lettura / scrittura |
+| Output | file `valori_perf.txt` (stessa cartella di questo registro) |
+
+##### Metriche usate
+
+| Evento `perf` | Cosa conta | Direzione |
+|---------------|------------|-----------|
+| `imx8_ddr0/read-cycles/` | cicli di trasferimento in **lettura** dal DRAM | CPU/cache refill, **scanout display** (LCDIF legge il framebuffer), DMA, … |
+| `imx8_ddr0/write-cycles/` | cicli di trasferimento in **scrittura** verso il DRAM | write-back cache, **memcpy PEG→dumb buffer**, pageflip, … |
+
+Non sono contatori di “byte puri”: sono cicli del PMU DDR i.MX8. Per ottenerne una **banda in MB/s** serve un fattore di conversione documentato da NXP / `perf` vendor events.
+
+##### Perché il calcolo è fatto così
+
+Sui SoC i.MX8M il PMU DDR espone `read-cycles` / `write-cycles`. Nelle metriche ufficiali Linux/`perf` per la famiglia i.MX8M (es. i.MX8MN/MQ, stesso modello di contatore) i byte stimati sono:
+
+\[
+\text{byte} = \text{cycles} \times 4 \times 2 = \text{cycles} \times 8
+\]
+
+| Fattore | Significato tipico |
+|--------:|--------------------|
+| **×4** | 32 bit di bus dati → **4 byte** per beat |
+| **×2** | DDR (double data rate): trasferimento su entrambi i fronti del clock |
+
+Quindi, per ogni intervallo di campionamento \(\Delta t\) (qui ≈ 0,1 s):
+
+\[
+\text{MB/s}_\text{read} = \frac{\text{read\_cycles} \times 8}{\Delta t \times 10^{6}}
+\qquad
+\text{MB/s}_\text{write} = \frac{\text{write\_cycles} \times 8}{\Delta t \times 10^{6}}
+\]
+
+\[
+\text{MB/s}_\text{totale} = \text{MB/s}_\text{read} + \text{MB/s}_\text{write}
+\]
+
+> **MB/s** = megabyte/s (10⁶). Se servissero megabit/s: ×8. Su i.MX8MP esistono anche eventi `axid-read` / `axid-write` già in byte; qui si è usato il comando a `*-cycles` già raccolto.
+
+##### Risultati (Test 6, target avn8mp, 2026-07-20)
+
+Due run da ~10 s / 100 campioni (`-I 100`), stesso fattore ×8.
+
+| Direzione | Riposo (GUI ferma) | Scroll grafico | Δ scroll − riposo |
+|-----------|-------------------:|---------------:|------------------:|
+| **Read** medio | **85 MB/s** | **204 MB/s** | **+119 MB/s** (~2,4×) |
+| **Write** medio | **18 MB/s** | **124 MB/s** | **+106 MB/s** (~7×) |
+| **Totale** medio | **104 MB/s** | **328 MB/s** | **+224 MB/s** (~3,2×) |
+| Totale mediana | 89 | 337 | — |
+| Totale p95 | 141 | 369 | — |
+| Totale min … max | 75 … 247 | 89 … **380** | picco scroll **~380 MB/s** |
+
+**Lettura operativa:**
+
+- A riposo resta una banda non nulla (~100 MB/s): soprattutto **letture di scanout** del display + idle di sistema.
+- In scroll sale soprattutto la **write** (~7×): coerente con burst di `memcpy` PEG→dumb buffer / upload dirty region.
+- La **read** sale ~2,4×: più traffico CPU sul framebuffer + scanout continuo.
+- Ordine di grandezza (~0,3 GB/s medi in scroll) su un bus LPDDR4 tipico ~12,8 GB/s peak → **utilizzo basso** in assoluto, ma il Δ vs riposo è la leva rilevante per interferenza RT (contendere la stessa DDR del task su CPU3).
+
+##### Relazione con le metriche GUI `[RT]`
+
+| Metrica | Ambito | Cosa misura |
+|---------|--------|-------------|
+| `reqMBps` / `effMBps` | solo path `uploadDirtyRegion` | byte della copia dirty PEG→output |
+| `imx8_ddr0/*-cycles` → MB/s | **tutto** il chip | somma di tutti i master sulla DDR |
+
+Quindi: `reqMBps` ≈ 24–50 MB/s in scroll (solo GUI) può coesistere con **~330 MB/s** DDR totali (GUI + scanout + resto). Non devono coincidere numericamente.
 
 #### F) Confronto `[RT] uploadDirtyRegion` — Test 0 vs Test 6 (2026-07-14)
 
