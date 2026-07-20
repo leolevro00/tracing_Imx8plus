@@ -1,8 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-15** (RT campagna **4 h** **102 µs** · **1** spike / **4,15 M** att. · **0 crash** · build **8ª**)
-
+> Ultimo aggiornamento: **2026-07-20** (sezione **Possibili migliorie**; experiment font #2; RT campagna **4 h** del 2026-07-15 invariata)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -221,7 +220,7 @@ Se il proxy scheduler resta < 100 µs e in futuro un worker mostrasse spike isol
 
 ## Stato test — tabella unica
 
-> **Questa è la tabella di riferimento.** I dettagli di ogni voce sono nelle sezioni **TEST 0**, **TEST 4**, … **TEST 7** sotto ([cronologia](#cronologia-dettagliata)).
+> **Questa è la tabella di riferimento.** I dettagli dei test eseguiti sono nelle sezioni **TEST 0** … **TEST 6** / **B** sotto ([cronologia](#cronologia-dettagliata)). Le leve ancora aperte (DCC, pixel clock, Bpp, asset, LVGL, font) sono in [**Possibili migliorie**](#possibili-migliorie).
 
 ### Test eseguiti (cronologia)
 
@@ -233,34 +232,130 @@ Se il proxy scheduler resta < 100 µs e in futuro un worker mostrasse spike isol
 | **5b** | Texture ARGB8888 nativa + conversione esplicita | ✅ GUI +150% · ❌ RT **191 µs** → **rollback** | [→ TEST 5b](#test-5b) |
 | **6** | DRM dumb buffer RGB565 (Opzione D POC) | ✅ RT · ✅ GUI · ✅ stabilità **8ª build** · campagna **4 h** **0 crash** (2026-07-15) | [→ TEST 6](#test-6) |
 | **B** | `SDL_LockTexture` streaming (Opzione B) | ❌ ≈ Test 0 · **rollback** | [→ TEST B](#test-b) |
-| **DCC** | Framebuffer Compression / Prefetch (fase 0) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ TEST DCC](#test-dcc) |
-| **7** | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ TEST 7](#test-7) |
 
 **Produzione attuale:** Test **6** su branch `experiment/test6-drm` — RT/GUI OK; stabilità **validata** (build **8ª**, campagna **4 h** senza crash, **1** spike RT / **4,15 M** att.). Test **0** resta fallback noto.
 
-### Prossimi test
+### Possibili migliorie (sintesi)
 
-| # | Test | Stato |
-|---|------|-------|
-| 1 | **Ottimizzazione immagini** — formati indicizzati/compressi; cache LVGL | ⬜ **prossimo** |
-| 2 | **Font Unicode** — solo range caratteri necessari nei font embedded | ⬜ da fare |
-| — | **Profondità di colore (Bpp)** | ✅ **già fatto** ([dettaglio Bpp](#bpp-gia-fatto)) |
+| # | Voce | Stato | Dettaglio |
+|---|------|-------|-----------|
+| 1 | Framebuffer Compression (DCC / Prefetch) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ §1](#pm-dcc) |
+| 2 | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ §2](#pm-pixel-clock) |
+| 3 | Profondità di colore (Bpp) | ✅ **Già a 16 bpp** — sotto non praticabile senza refactor | [→ §3](#pm-bpp) |
+| 4 | Ottimizzazione immagini (indicizzate / compressi) | ⬜ **Da valutare** | [→ §4](#pm-immagini) |
+| 5 | Ridurre cache LVGL | ❌ **Non pertinente** (UI disegnata da PEG) | [→ §5](#pm-lvgl-cache) |
+| 6 | Font — solo caratteri Unicode necessari | 🟡 **Parziale** — pulizia ridondanze Chs ✅; subset Unicode ancora aperto | [→ §6](#pm-font) |
 
-### Archiviati / non prioritari
-
-| Test | Descrizione | Stato |
-|------|-------------|-------|
-| **7** | Pixel clock display — abbassare timing LVDS | ⏸️ **Sospeso** — fase 0 OK; proseguimento solo con patch **BSP Yocto** ([TEST 7](#test-7)) |
-| C | Double buffering KMSDRM (già `SDL_VIDEO_DOUBLE_BUFFER=1`) | ⬜ nessun margine |
+Elenco completo con cosa è stato fatto/testato: [**Possibili migliorie**](#possibili-migliorie).
 
 ### Come leggere gli esiti (due assi indipendenti)
 
 | Asse | Metriche | Cosa misura |
 |------|----------|-------------|
-| **GUI** | `effMBps`, `updateMs`, `reqMBps` | Upload interfaccia (`uploadDirtyRegion` → SDL) |
+| **GUI** | `effMBps`, `updateMs`, `reqMBps` | Upload interfaccia (`uploadDirtyRegion` → SDL/DRM) |
 | **RT** | `rtc_handler_us`, `nanosleep` max | Ritardo risveglio **`COM RTC Handler`** (scheduler RT, CPU3) — vedi [metodologia](#rt-metodologia-scheduler); obiettivo **< 100 µs** |
 
 > Un test può migliorare la **GUI** senza migliorare il **RT**, e viceversa.
+
+---
+
+<a id="possibili-migliorie"></a>
+
+## Possibili migliorie
+
+Leve di ottimizzazione (banda DDR, flash, RAM asset) **oltre** ai test di pipeline già chiusi in cronologia. Per ogni punto: obiettivo, cosa è stato fatto/testato, cosa si può o non si può fare.
+
+---
+
+<a id="pm-dcc"></a>
+
+### 1 — Framebuffer Compression (DCC / Prefetch) nel driver DRM/KMS
+
+**Obiettivo:** ridurre in modo significativo la banda memoria verso lo scanout display.
+
+| | |
+|--|--|
+| **Stato** | ❌ **Non applicabile** su i.MX8MP (LCDIFv3) con il BSP attuale |
+| **Dove si agisce** | Kernel / DRM — **non** in PegLib / `rtos.ini` |
+| **Fatto / testato** | Fase 0 sul target avn8mp (2026-07-10): `modetest`, formati plane, `dmesg` imx-drm. Pipeline **LCDIFv3 → LDB LVDS**; solo formati **lineari** (`XR24`, `RG16`, …). Nessun modifier compresso / DCC / Prefetch esposto (a differenza di i.MX8MQ+DCSS). |
+| **Si può fare?** | **No** su questo hardware/BSP, senza cambio SoC o un supporto kernel non documentato su 8MP LCDIF. |
+| **Dettaglio storico** | [TEST DCC (cronologia)](#test-dcc) |
+
+---
+
+<a id="pm-pixel-clock"></a>
+
+### 2 — Limitare la frequenza di clock del display (pixel clock) via kernel
+
+**Obiettivo:** ridurre banda DDR di scanout abbassando pixel/s verso il pannello (possibile beneficio RT).
+
+| | |
+|--|--|
+| **Stato** | ⏸️ **Sospeso** — diagnosi fase 0 completata; prosecuzione solo in **BSP Yocto** |
+| **Dove si agisce** | Device tree + eventuale patch LDB / PLL — **non** in PegLib |
+| **Fatto / testato** | Fase 0 (2026-07-10): mode unico **1024×600 @ 64,31 Hz**, pixel clock già **49,5 MHz** (`media_disp2_pix`), sotto i 74,25 MHz tipici del fixup LDB. Un solo mode → niente `modetest` alternativo senza DT. |
+| **Si può fare?** | **Sì, ma solo via BSP:** nuovo `display-timings` (es. 40–45 MHz), eventuale patch `imx8mp-ldb.c`, rebuild kernel+DTB, verifica datasheet pannello. **Non** richiede ricompilazione della sola applicazione HMI. |
+| **Dettaglio storico** | [TEST 7 (cronologia)](#test-7) |
+
+---
+
+<a id="pm-bpp"></a>
+
+### 3 — Ridurre la profondità di colore del driver video (Bpp)
+
+**Obiettivo:** meno byte/pixel → meno footprint framebuffer e meno banda upload/scanout.
+
+| | |
+|--|--|
+| **Stato** | ✅ **Già in produzione a 16 bpp (RGB565)** |
+| **Dove si agisce** | `rtos.ini` (`Bpp=`, `ForceBPP=True`) + driver PEG DIB |
+| **Fatto / testato** | Path embedded e Test 6 usano già **RGB565**. Log `[RT] … @ 16 bpp`. Alternativa `Bpp=24` esiste ma **aumenta** i byte (+50%). Formati 8/1/4 non usabili sul path attuale. |
+| **Si può fare?** | **Scendere sotto 16 bpp: no** senza refactor del pipeline colore PEG/SDL/DRM. Restare a 16 e ridurre risoluzione (Test 4 ✅) o asset: sì. |
+| **Dettaglio** | [Profondità di colore (Bpp)](#bpp-gia-fatto) |
+
+---
+
+<a id="pm-immagini"></a>
+
+### 4 — Ottimizzare le immagini (formati indicizzati / compressione)
+
+**Obiettivo:** ridurre flash e RAM degli asset grafici (icone, bitmap UI) con PegBitmap 8 bpp / RLE o equivalenti compressi.
+
+| | |
+|--|--|
+| **Stato** | ⬜ **Da valutare** — non ancora campagna sistematica |
+| **Dove si agisce** | Asset / tool di cattura PegBitmap — **non** la profondità di scanout DRM |
+| **Fatto / testato** | Identificato come leva distinta dal Bpp di framebuffer (il display resta RGB565). Nessun inventario quantitativo asset ancora chiuso in questo registro. |
+| **Si può fare?** | **Sì in linea di principio**, con impatto su look (palette) e lavoro di conversione asset. Non sostituisce DCC né riduce il pixel clock. |
+
+---
+
+<a id="pm-lvgl-cache"></a>
+
+### 5 — Ridurre la cache LVGL
+
+**Obiettivo (tipico in HMI LVGL-native):** liberare RAM riducendo buffer/cache di disegno e immagini di LVGL (`lv_conf.h`).
+
+| | |
+|--|--|
+| **Stato** | ❌ **Non pertinente** su questo stack |
+| **Perché** | L’UI è disegnata da **PEG** sul framebuffer; LVGL nel path Test 6 fa essenzialmente `lv_init` + `lv_timer_handler` e **non** gestisce widget, display né PegFont. La RAM rilevante è PEG + DRM + font/asset, non la cache LVGL. |
+| **Si può fare?** | Si possono ridurre parametri LVGL, ma **non** è una leva utile per flash font, banda display o RT del `COM RTC Handler`. |
+
+---
+
+<a id="pm-font"></a>
+
+### 6 — Font: includere solo i caratteri (range Unicode) strettamente necessari
+
+**Obiettivo:** minimizzare flash (e, dove i glifi sono caricati, RAM) dei font embedded / pacchetti lingua.
+
+| | |
+|--|--|
+| **Stato** | 🟡 **Parziale** |
+| **Fatto / testato** | Misura footprint font sull’immagine; experiment **#2 pulizia build** (`experiment/test6-with-new-font` in kvuib): rimossi `Yahei_N.cpp` morti dalle `libPegFontChs*` (runtime CHS usa già `PegFontTypeYaHeiN.gz`). **Flash Chs: 17,82 → 11,54 MB (−6,28 MB / −6 584 848 B)**. RAM path Yahei **invariata** (glifi usati restano dal `.gz`). |
+| **Si può fare ancora?** | **Subset Unicode** (ricattura solo glifi usati nelle stringhe UI) → sì, massimo guadagno a lungo termine; serve PEG Font Capture + charset. **SKU EU slim** (non installare lib CJK) → sì su immagini lab EU-only. |
+| **Dettaglio** | [Experiment font #2](#experiment-font-2) |
 
 ---
 
@@ -1681,9 +1776,11 @@ RT entro rumore di misura (±2 µs), **nessun beneficio reale**.
 
 <a id="test-7"></a>
 
-## TEST 7 — Pixel clock display (kernel / DRM)
+## TEST 7 — Pixel clock display (kernel / DRM) *(cronologia)*
 
-**Stato:** ⏸️ **Sospeso** (2026-07-10) — fase 0 ✅ · fasi 2–3 solo via **BSP Yocto** · **Repo app:** nessuna modifica · [← Tabella](#stato-test)
+**Stato canonico:** ⏸️ [Possibili migliorie §2](#pm-pixel-clock) — questa sezione resta il **log dettagliato** fase 0.
+
+**Stato:** ⏸️ **Sospeso** (2026-07-10) — fase 0 ✅ · fasi 2–3 solo via **BSP Yocto** · **Repo app:** nessuna modifica · [← Tabella](#stato-test) · [← Possibili migliorie](#possibili-migliorie)
 
 > **Decisione:** il test **non prosegue** nel percorso `pegenstein`. Diagnosi completata; ulteriore abbassamento del pixel clock richiede modifica device tree (e eventuale kernel) nel repo Yocto, rebuild immagine e reboot. Riprendere quando si lavora sul BSP.
 
@@ -1815,17 +1912,19 @@ Stesso protocollo di [Test 0](#test-0):
 
 ## Prossimi test in coda
 
-> **Tabella aggiornata in cima al documento:** [Stato test — tabella unica](#stato-test) (sezione **Prossimi test**).
+> **Stato aggiornato:** [Possibili migliorie](#possibili-migliorie) e sintesi in [Stato test](#stato-test).
 >
-> Non duplicare qui — modificare solo la tabella in alto.
+> Non duplicare qui — modificare solo quelle sezioni.
 
 ---
 
 <a id="test-dcc"></a>
 
-## TEST DCC — Framebuffer Compression / Prefetch (fase 0, i.MX8MP)
+## TEST DCC — Framebuffer Compression / Prefetch (fase 0, i.MX8MP) *(cronologia)*
 
-**Stato:** ❌ Non applicabile · **Data diagnosi:** 2026-07-10 · [← Tabella](#stato-test)
+**Stato canonico:** ❌ [Possibili migliorie §1](#pm-dcc) — questa sezione resta il **log dettagliato** fase 0.
+
+**Stato:** ❌ Non applicabile · **Data diagnosi:** 2026-07-10 · [← Tabella](#stato-test) · [← Possibili migliorie](#possibili-migliorie)
 
 ---
 
@@ -1983,7 +2082,7 @@ ForceBPP=True   ; obbligatorio: forza il valore da ini
 | 16 | 2 | **~1,17 MiB** |
 | 24 | 3 | **~1,76 MiB** (+50%) |
 
-> Per ridurre ulteriormente la banda pixel oltre il 16 bpp, le leve rimanenti sono **risoluzione** (Test 4 ✅), **DCC/Prefetch** (punto 3) e **ottimizzazione asset** (punto 6) — non scendere sotto 16 bpp senza refactor del pipeline colore PEG/SDL.
+> Per ridurre ulteriormente la banda pixel oltre il 16 bpp, le leve rimanenti sono **risoluzione** (Test 4 ✅), [DCC/Prefetch](#pm-dcc) (non applicabile su 8MP) e [ottimizzazione asset](#pm-immagini) — non scendere sotto 16 bpp senza refactor del pipeline colore PEG/SDL/DRM.
 
 ---
 
@@ -1997,11 +2096,15 @@ ForceBPP=True   ; obbligatorio: forza il valore da ini
 - **Avvio RT:** non avviare Lnk subito dopo PegExec — attendere **≥ 30 s** (vedi protocollo sopra)
 - **Trappola:** log `[RT]` visibili con `.so` vecchio anche se macro commentata → verificare con `strings`
 - **Diagnosi SDL:** `strings libPegLib.so | grep '\[RT\] diag'` — se assente, macro `EMBEDDED_HMI_RT_DIAG` non compilata
-- **LVGL:** irrilevante per il percorso display; non ottimizzare cache LVGL per questo problema
+- **LVGL:** irrilevante per il percorso display — vedi [Possibili migliorie §5](#pm-lvgl-cache)
 
 ---
 
+<a id="experiment-font-2"></a>
+
 ## O — Experiment font #2 (pulizia PegFontChs, 2026-07-16)
+
+> Sintesi nello stato leve: [Possibili migliorie §6](#pm-font).
 
 ### Quale delle 3 ha più senso
 
@@ -2127,8 +2230,8 @@ ls -l /opt/Squeeze/libPegFontChs*.so.1.0.0
 # es. smem -P PegExec   oppure   ps -o rss= -p $(pidof PegExec)
 ```
 
-**In una frase per il professore / checklist:**  
-controllata la memoria font nel caso specifico → **flash Chs 17.82 → 11.54 MB (−6.28 MB)**; **RAM runtime del path Yahei invariata** perché i glifi usati restano quelli del `.gz`.
+**Sintesi misura (caso specifico):**  
+controllata la memoria font → **flash Chs 17.82 → 11.54 MB (−6.28 MB)**; **RAM runtime del path Yahei invariata** perché i glifi usati restano quelli del `.gz`.
 
 ---
 
