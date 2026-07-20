@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-20** (audit PegBitmap §4; sezione **Possibili migliorie**; experiment font #2; RT campagna **4 h** del 2026-07-15 invariata)
+> Ultimo aggiornamento: **2026-07-20** (fix multitouch Die Set / freeze CAD; audit PegBitmap §4; **Possibili migliorie**; experiment font #2; RT campagna **4 h** del 2026-07-15 invariata)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -1604,27 +1604,77 @@ Core: CPU3
 
 ---
 
-### Esito attuale (2026-07-15)
+<a id="test-6-multitouch-die-set"></a>
 
-> ✅ **Test 6 — RT:** campagna endurance **~4 h** — worst **102 µs** @ iter **14 685**, **1** spike > 100 µs su **~4,15 M** attivazioni — vedi [sezione N](#test-6-campagna-endurance-4h). Sessioni precedenti: **99 µs** (1h15, iter 33 934), **109 µs** (dezoom), **68 µs** (ottimizzatore 17 pieghe).
+#### O) Freeze CAD Die Set — gesto a due dita / pinch (2026-07-20) — ✅ risolto
+
+**Contesto:** pagina **Die Set** (CAD matrice), path Test 6 (`EMBEDDED_HMI_RT_DRM_DIRECT` + touch ILITEK via `pegdrm_evdev`).
+
+**Sintomo:**
+
+| Gesto | Comportamento |
+|-------|----------------|
+| **1 dito** (pan) | OK — disegno si sposta in modo controllato |
+| **2 dita** (mimica pinch/zoom) | disegno **salta a zig-zag** su/giù; poi GUI **freeze** (strisce verticali / artefatti); campo lato es. `DX≈-12070` fuori scala |
+
+**Metriche durante il freeze (stderr `[RT]`):**
+
+| Fase | `updateMs` | `calls` | `maxRectPx` | Note |
+|------|----------:|--------:|------------:|------|
+| Burst 2 dita | **~53–58 ms** | ~100 | ~485 051 | pan a raffica |
+| Escalation freeze | **29 → 572 ms** | 22–77 | ~485 051 | `effMBps` crolla (~610 → ~22) — GUI satura |
+
+**Causa (catena):**
+
+1. `pegdrm_evdev` trattava il multitouch Type B come **un solo cursore**, **senza** filtrare `ABS_MT_SLOT`: a ogni `SYN_REPORT` le coordinate saltavano tra dito 1 e dito 2.
+2. PEG vede un mouse con LMB premuto → `CPPGBaseView::OnMove` → `UpdateAllViews()` a ogni salto (soglia 2 px).
+3. ILITEK emette ~**100 Hz** di `SYN_REPORT`: ogni evento diventava un motion immediato verso PEG → centinaia di ridisegni CAD + upload full-canvas → `updateMs` a centinaia di ms → **freeze** (interferenza DDR/CPU anche sul thread RT).
+
+> Il pinch **non** è supportato dall’HMI (zoom solo tasti `+` / `−` / fit). Il gesto a 2 dita era solo un pan spurio.
+
+**Fix** (`pegenstein/PegLib/pegdrm_evdev.cpp` + `.h`, branch Test 6):
+
+| Misura | Comportamento |
+|--------|----------------|
+| **Solo primo dito** | `ABS_MT_SLOT` + `TRACKING_ID`: il primo contatto è lo slot primario; gli altri non aggiornano `m_curX/Y` |
+| **Abort su 2° dito** | secondo `TRACKING_ID ≥ 0` → `TouchUp`, flag `m_suppressMulti` fino a tutte le dita alzate |
+| **Coalescing motion** | al massimo **1** `TouchMotion` per chiamata a `poll()` (non uno per ogni `SYN_REPORT`) |
+
+**Validazione post-fix (2026-07-20):**
+
+| Check | Esito |
+|-------|-------|
+| Freeze / zig-zag con 2 dita | ✅ **risolto** — 2° dito interrompe il drag, niente pan a raffica |
+| Pan 1 dito + aggiunta lati Die Set | ✅ usabile |
+| Spike RT durante aggiunta righe | **1** outlier nanosleep **111 µs** (unico > 100 µs); correlato temporalmente a un `updateMs≈110` **ms** (ridisegno CAD), **non** la stessa grandezza; **non ricomparso** continuando ad aggiungere lati |
+
+> **Unità:** ritardo nanosleep = **µs**; `updateMs` = **ms**. I numeri ~111 / ~110 sembrano “uguali” ma sono scale diverse; la correlazione è l’istante di carico GUI, non un ritardo RT di 110 ms.
+
+**Deploy:** ricompilare e copiare `libPegLib.so` in `/opt/Squeeze/`.
+
+---
+
+### Esito attuale (2026-07-20)
+
+> ✅ **Test 6 — RT:** campagna endurance **~4 h** (2026-07-15) — worst **102 µs** @ iter **14 685**, **1** spike > 100 µs su **~4,15 M** attivazioni — vedi [sezione N](#test-6-campagna-endurance-4h). Sessioni precedenti: **99 µs** (1h15), **109 µs** (dezoom), **68 µs** (ottimizzatore). Sessione Die Set (2026-07-20): outlier unico **111 µs** — vedi [O](#test-6-multitouch-die-set).
 >
 > ✅ **Test 6 — Stabilità crash:** **0 crash** su **4 h** (build **8ª**); **Calculate 40/40** risolto con **7ª build** (`PolyLinePez`).
 >
-> ✅ **Test 6 — Responsiveness:** freeze su **Optimize / `THR_ENDSOL`** risolto con **8ª build** — vedi [sezione M](#test-6-freeze-ottimizza-40-40); validazione rapida **4 pieghe** OK (2026-07-15).
+> ✅ **Test 6 — Responsiveness:** freeze **Optimize / `THR_ENDSOL`** risolto (**8ª**); freeze **Die Set 2 dita / pinch** risolto in `pegdrm_evdev` (2026-07-20) — vedi [sezione O](#test-6-multitouch-die-set).
 
 | Asse | Esito attuale Test 6 |
 |------|----------------------|
-| **RT** | ✅ worst **102 µs** (4 h, iter 14 685) · **1** spike / **4,15 M** att. · **99 µs** (1h15) · **68 µs** (ottimizzatore) · **109 µs** (dezoom) |
+| **RT** | ✅ worst **102 µs** (4 h) · **1** spike / **4,15 M** · Die Set **111 µs** (1 outlier, 2026-07-20) · **99 µs** (1h15) · **68 µs** (ottimizzatore) · **109 µs** (dezoom) |
 | **GUI rendering** | ✅ touch OK · ✅ linee orizzontali risolte · ✅ rettangoli bianchi assenti |
-| **GUI liveness** | ✅ Freeze **`THR_ENDSOL`** risolto (8ª, 2026-07-15) |
+| **GUI liveness** | ✅ Freeze **`THR_ENDSOL`** risolto (8ª) · ✅ Freeze **Die Set multitouch** risolto (`pegdrm_evdev`, 2026-07-20) |
 | **CPU** | ✅ idle PegExec **4%** / Lnk **19%** (2026-07-13) · stress PegExec **30,5%** · ottimizzatore PegExec **~60%** + SqServerd **~47%** (17 pieghe) |
 | **Stabilità crash** | ✅ **0 crash** su campagna **~4 h** (8ª, 2026-07-15) · **Calculate 40/40** (7ª) |
 
-**Stato codice:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` su branch `experiment/test6-drm` (`PegLib`); fix stabilità **cad2d/ottimizzatore** (1–7ª) + **sim2d** freeze Optimize (**8ª**: `Ottimdlg.cpp`, `Sim2DFrame.cpp`).
+**Stato codice:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` su branch Test 6 (`PegLib`); fix stabilità **cad2d/ottimizzatore** (1–7ª) + **sim2d** freeze Optimize (**8ª**); **evdev single-pointer + coalescing** (2026-07-20, Die Set).
 
 **Prossimi passi:**
 
-1. **Promuovere Test 6 a produzione** (merge `experiment/test6-drm` → main; deploy `libPegLib.so` + `libcad2d.so` + `libsim2d.so` + lib ottimizzatore + `PegExec`)
+1. **Promuovere Test 6 a produzione** (merge branch Test 6 → main; deploy `libPegLib.so` + `libcad2d.so` + `libsim2d.so` + lib ottimizzatore + `PegExec`)
 2. Rimuovere `CAD_DIAG_CALCULATE` dai `.pro` per build produzione (stderr pulito)
 3. Opzionale RT: **istogramma** ritardi 50–120 µs (70 bin) in Lnk/PerfMonitor per grafico distribuzione
 4. Pin permanente `Lnk` su CPU3 (`taskset -cp 3 $(pidof Lnk)`)
