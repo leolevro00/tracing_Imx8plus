@@ -966,26 +966,25 @@ Non sono contatori di “byte puri”: sono cicli del PMU DDR i.MX8. Per ottener
 
 Sui SoC i.MX8M il PMU DDR espone `read-cycles` / `write-cycles`. Nelle metriche ufficiali Linux/`perf` per la famiglia i.MX8M (es. i.MX8MN/MQ, stesso modello di contatore) i byte stimati sono:
 
-\[
-\text{byte} = \text{cycles} \times 4 \times 2 = \text{cycles} \times 8
-\]
+```text
+byte = cycles × 4 × 2 = cycles × 8
+```
 
 | Fattore | Significato tipico |
 |--------:|--------------------|
 | **×4** | 32 bit di bus dati → **4 byte** per beat |
 | **×2** | DDR (double data rate): trasferimento su entrambi i fronti del clock |
 
-Quindi, per ogni intervallo di campionamento \(\Delta t\) (qui ≈ 0,1 s):
+Quindi, per ogni intervallo di campionamento Δt (qui ≈ 0,1 s):
 
-\[
-\text{MB/s}_\text{read} = \frac{\text{read\_cycles} \times 8}{\Delta t \times 10^{6}}
-\qquad
-\text{MB/s}_\text{write} = \frac{\text{write\_cycles} \times 8}{\Delta t \times 10^{6}}
-\]
+```text
+MB/s_read  = (read_cycles  × 8) / (Δt × 1_000_000)
+MB/s_write = (write_cycles × 8) / (Δt × 1_000_000)
 
-\[
-\text{MB/s}_\text{totale} = \text{MB/s}_\text{read} + \text{MB/s}_\text{write}
-\]
+MB/s_totale = MB/s_read + MB/s_write
+```
+
+Esempio: `1_064_521` read-cycles in `0,100` s → `(1_064_521 × 8) / 0,100 / 1e6` ≈ **85 MB/s** in lettura.
 
 > **MB/s** = megabyte/s (10⁶). Se servissero megabit/s: ×8. Su i.MX8MP esistono anche eventi `axid-read` / `axid-write` già in byte; qui si è usato il comando a `*-cycles` già raccolto.
 
