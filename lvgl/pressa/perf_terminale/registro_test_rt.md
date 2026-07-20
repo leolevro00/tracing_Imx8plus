@@ -992,20 +992,31 @@ Esempio: `1_064_521` read-cycles in `0,100` s → `(1_064_521 × 8) / 0,100 / 1e
 
 Due run da ~10 s / 100 campioni (`-I 100`), stesso fattore ×8.
 
-| Direzione | Riposo (GUI ferma) | Scroll grafico | Δ scroll − riposo |
-|-----------|-------------------:|---------------:|------------------:|
-| **Read** medio | **85 MB/s** | **204 MB/s** | **+119 MB/s** (~2,4×) |
-| **Write** medio | **18 MB/s** | **124 MB/s** | **+106 MB/s** (~7×) |
-| **Totale** medio | **104 MB/s** | **328 MB/s** | **+224 MB/s** (~3,2×) |
-| Totale mediana | 89 | 337 | — |
-| Totale p95 | 141 | 369 | — |
-| Totale min … max | 75 … 247 | 89 … **380** | picco scroll **~380 MB/s** |
+Per ogni intervallo da 0,1 s si calcola `MB/s_read`, `MB/s_write` e `MB/s_totale = read + write`. Poi, **separatamente** su ciascuna delle tre serie da ~100 punti: media, mediana, p95, min e max.
+
+| Serie (MB/s) | Stat | Riposo (GUI ferma) | Scroll grafico | Δ scroll − riposo |
+|--------------|------|-------------------:|---------------:|------------------:|
+| **Read** | medio | **85** | **204** | **+119** (~2,4×) |
+| | mediana | 79 | 209 | — |
+| | p95 | 105 | 225 | — |
+| | min … max | 68 … 181 | 79 … 232 | — |
+| **Write** | medio | **18** | **124** | **+106** (~7×) |
+| | mediana | 10 | 128 | — |
+| | p95 | 35 | 144 | — |
+| | min … max | 7 … 65 | 10 … 148 | — |
+| **Totale** (R+W) | medio | **104** | **328** | **+224** (~3,2×) |
+| | mediana | 89 | 337 | — |
+| | p95 | 141 | 369 | — |
+| | min … max | 75 … 247 | 89 … **380** | picco totale scroll **~380** |
+
+> **min … max** di una riga = estremi di **quella** serie (solo read, solo write, o totale), non mischiati. Es. Write scroll 10…148 ≠ Totale scroll 89…380.
 
 **Lettura operativa:**
 
-- A riposo resta una banda non nulla (~100 MB/s): soprattutto **letture di scanout** del display + idle di sistema.
-- In scroll sale soprattutto la **write** (~7×): coerente con burst di `memcpy` PEG→dumb buffer / upload dirty region.
-- La **read** sale ~2,4×: più traffico CPU sul framebuffer + scanout continuo.
+- A riposo resta una banda non nulla (~100 MB/s totali): soprattutto **letture di scanout** del display + idle di sistema (write bassa, max ~65 MB/s).
+- In scroll sale soprattutto la **write** (~7× in media; max ~148 MB/s): coerente con burst di `memcpy` PEG→dumb buffer / upload dirty region.
+- La **read** sale ~2,4× (media 85→204; max ~232): più traffico CPU sul framebuffer + scanout continuo.
+- Il picco **totale** ~380 MB/s è R+W nello stesso intervallo da 0,1 s, non il max read sommato al max write (che sarebbero istanti diversi).
 - Ordine di grandezza (~0,3 GB/s medi in scroll) su un bus LPDDR4 tipico ~12,8 GB/s peak → **utilizzo basso** in assoluto, ma il Δ vs riposo è la leva rilevante per interferenza RT (contendere la stessa DDR del task su CPU3).
 
 ##### Relazione con le metriche GUI `[RT]`
