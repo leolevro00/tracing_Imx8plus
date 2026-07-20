@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-20** (sezione **Possibili migliorie**; experiment font #2; RT campagna **4 h** del 2026-07-15 invariata)
+> Ultimo aggiornamento: **2026-07-20** (audit PegBitmap §4; sezione **Possibili migliorie**; experiment font #2; RT campagna **4 h** del 2026-07-15 invariata)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -13,6 +13,7 @@
 | `interferenza_cpu_ddr_idle_vs_interazione.md` | Argomento CPU/DDR vs GPU per la tesi |
 | `riduzione_framebuffer_esperimenti.md` | Opzioni A–E (formato texture, LockTexture, DRM diretto, …) |
 | `osservazioni` / `test-perf` | Note raw su `perf stat`, `htop`, `gc/meminfo` |
+| [DIAGNOSTICA TEST 6](#diagnostica-test-6) | **In questo file** — come attivare/disattivare ogni macro di trace (`[CAD]`, `[RT]`, crash) |
 
 ---
 
@@ -242,7 +243,7 @@ Se il proxy scheduler resta < 100 µs e in futuro un worker mostrasse spike isol
 | 1 | Framebuffer Compression (DCC / Prefetch) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ §1](#pm-dcc) |
 | 2 | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ §2](#pm-pixel-clock) |
 | 3 | Profondità di colore (Bpp) | ✅ **Già a 16 bpp** — sotto non praticabile senza refactor | [→ §3](#pm-bpp) |
-| 4 | Ottimizzazione immagini (indicizzate / compressi) | ⬜ **Da valutare** | [→ §4](#pm-immagini) |
+| 4 | Ottimizzazione immagini (indicizzate / compressi) | ✅ **Già applicata** — audit 2026-07-20; residuo ~tens of KB | [→ §4](#pm-immagini) |
 | 5 | Ridurre cache LVGL | ❌ **Non pertinente** (UI disegnata da PEG) | [→ §5](#pm-lvgl-cache) |
 | 6 | Font — solo caratteri Unicode necessari | 🟡 **Parziale** — pulizia ridondanze Chs ✅; subset Unicode ancora aperto | [→ §6](#pm-font) |
 
@@ -323,12 +324,31 @@ Leve di ottimizzazione (banda DDR, flash, RAM asset) **oltre** ai test di pipeli
 
 | | |
 |--|--|
-| **Stato** | ⬜ **Da valutare** — non ancora campagna sistematica |
-| **Dove si agisce** | Asset / tool di cattura PegBitmap — **non** la profondità di scanout DRM |
-| **Fatto / testato** | Identificato come leva distinta dal Bpp di framebuffer (il display resta RGB565). Nessun inventario quantitativo asset ancora chiuso in questo registro. |
-| **Si può fare?** | **Sì in linea di principio**, con impatto su look (palette) e lavoro di conversione asset. Non sostituisce DCC né riduce il pixel clock. |
+| **Stato** | ✅ **Già applicata in larga parte** — audit statico **2026-07-20**; campagna di conversione di massa **non giustificata** |
+| **Dove si agisce** | Asset / tool di cattura PegBitmap — **non** la profondità di scanout DRM (resta RGB565) |
+| **Si può fare ancora?** | Solo residui minori (icone toolbar 16 bpp RAW ≈ **27 KB** totali). Non è una leva RT/banda display. |
+
+#### Audit PegBitmap (kvuib + pressbrakepeg, 2026-07-20)
+
+Ambito: inizializzazioni `PegBitmap name = { flags, bpp, w, h, … }` nei sorgenti applicazione (esclusi font `pegfont/` e third_party).
+
+| Metrica | Valore |
+|---------|-------:|
+| PegBitmap trovati | **832** |
+| Già **8 bpp + RLE** (`BMF_RLE`) | **796** (**95,7 %**) |
+| **8 bpp RAW** (no RLE) | **7** (icone 8×8 / 16×16, payload trascurabile) |
+| **16 bpp RAW** | **29** (toolbar / menu editor in `UimResIco.cpp`) |
+| Payload UCHAR stimato (array bitmap UI rilevanti) | **ordine ~0,3–0,5 MB** (non multi-MB) |
+| Residuo convertibile 16→8 bpp (upper bound flash) | **≈ 27 KB** (29 icone) |
+
+**Esempio efficacia RLE già in uso:** `gbBackgroundBitmap` (585×344, 8 bpp) — raw teorico ≈ **196 KB**, payload RLE ≈ **15,7 KB** (rapporto ≈ **0,08**). Frame animazione `UimResAviFrames` (272×60) tipicamente ≈ **1,7–1,8 KB** RLE vs ≈ **15,9 KB** raw.
+
+**File sorgente più rilevanti (payload bitmap, non font):** `UimResIco.cpp`, `UimResAviFrames.cpp`, `pegmain/pimage.cpp`, `liste/bitmap.cpp`, `Flags.cpp`, `Keys.cpp`, `Logo.cpp`.
+
+**Conclusione:** la raccomandazione “usare formati indicizzati / compressi” è **già lo standard** dello stack PEG su questa HMI. Un’ulteriore campagna di conversione recupererebbe al più **decine di KB** di flash, con rischio look (palette) e costo di ricattura non proporzionato. Priorità memoria/flash restano i **font** ([§6](#pm-font)), non le bitmap UI.
 
 ---
+
 
 <a id="pm-lvgl-cache"></a>
 
@@ -2083,6 +2103,185 @@ ForceBPP=True   ; obbligatorio: forza il valore da ini
 | 24 | 3 | **~1,76 MiB** (+50%) |
 
 > Per ridurre ulteriormente la banda pixel oltre il 16 bpp, le leve rimanenti sono **risoluzione** (Test 4 ✅), [DCC/Prefetch](#pm-dcc) (non applicabile su 8MP) e [ottimizzazione asset](#pm-immagini) — non scendere sotto 16 bpp senza refactor del pipeline colore PEG/SDL/DRM.
+
+---
+
+<a id="diagnostica-test-6"></a>
+
+## DIAGNOSTICA TEST 6
+
+Guida operativa: **cosa modificare nel codice** per attivare o disattivare ogni tipo di log/trace introdotto durante i test RT / stabilità Calculate–Optimize. Due famiglie distinte:
+
+| Prefisso stderr | Modulo | Macro principale | File di controllo |
+|-----------------|--------|------------------|-------------------|
+| **`[CAD] diag`** | Calculate / ottimizzatore / Sim2D | `CAD_DIAG_CALCULATE` | `pressbrakepeg/.../*.pro` + `CommonConst.h` |
+| **`[RT]`** | Display / upload / DRM / crash | `EMBEDDED_HMI_RT_*` | `pegenstein/PegLib/PegLib.pro` |
+
+Dopo ogni modifica ai `.pro`: **ricompilare** la libreria interessata e **copiare** le `.so` in `/opt/Squeeze/`.
+
+---
+
+### A — `[CAD] diag` (Calculate / Optimize / Sim2D)
+
+**Sintomo:** righe continue tipo  
+`[CAD] diag LookForBends: nsect=1 piega=9 rot=-1 sez=18 …`  
+soprattutto con dialog **Optimization in progress** (loop dell’ottimizzatore).
+
+**Meccanismo:** macro `CAD_DIAG(tag, fmt, …)` in `pressbrakepeg/IncPPG/CommonConst.h`. Se `CAD_DIAG_CALCULATE` è **1** a compile-time, ogni chiamata fa `fprintf(stderr, …)` + `fflush`.
+
+#### Disattivare (stderr pulito — produzione)
+
+1. Aprire e **commentare o rimuovere** la riga in **entrambi** i file (oggi ancora attivi per debug freeze Optimize):
+
+| File | Riga da togliere |
+|------|------------------|
+| [`pressbrakepeg/sim2d/sim2d.pro`](../../../Squeeze/pressbrakepeg/sim2d/sim2d.pro) | `DEFINES += CAD_DIAG_CALCULATE` |
+| [`pressbrakepeg/ottimizzatore/ottimizzatore.pro`](../../../Squeeze/pressbrakepeg/ottimizzatore/ottimizzatore.pro) | `DEFINES += CAD_DIAG_CALCULATE` |
+
+`cad2d/cad2d.pro` **non** ha questa define (già off).
+
+2. Ricompilare e deploy:
+
+```bash
+# build avn8mp (script o qmake/make su sim2d + ottimizzatore)
+cp pressbrakepeg/out/avn8mp/release/libsim2d.so* /opt/Squeeze/
+cp pressbrakepeg/out/avn8mp/release/libottimizzatore.so* /opt/Squeeze/
+# libcad2d solo se avete aggiunto CAD_DIAG anche lì
+```
+
+3. Verifica trace **spento**:
+
+```bash
+strings /opt/Squeeze/libsim2d.so | grep '\[CAD\] diag'
+# atteso: nessun output
+
+strings /opt/Squeeze/libottimizzatore.so | grep '\[CAD\] diag'
+# atteso: nessun output
+```
+
+#### Riattivare (debug crash Calculate / freeze Optimize)
+
+Aggiungere in **ciascuno** di `sim2d.pro`, `ottimizzatore.pro` e (opzionale) `cad2d/cad2d.pro`:
+
+```qmake
+DEFINES += CAD_DIAG_CALCULATE
+```
+
+Ricompilare le tre librerie. L’ultima riga `[CAD] diag` su stderr prima di un crash indica il punto nel percorso.
+
+**Punti trace principali** (non serve toccare il codice sorgente, solo la macro):
+
+| Tag `CAD_DIAG` | File | Quando |
+|----------------|------|--------|
+| `LookForBends` | `ottimizzatore/Ottutens.cpp` | ogni piega provata in ottimizzazione |
+| `CalcolaNewSituaz`, `MainOtt`, `ottimize_cycle` | `ottimizzatore/Ottcomp.cpp` | ciclo ottimizzatore |
+| `OttimDlg`, `OnOttimizza` | `sim2d/Ottimdlg.cpp`, `Sim2DFrame.cpp` | dialog Optimize |
+| `OnCalcola`, `OnSim2DCalcola` | `cad2d/PezzoFrame.cpp`, `sim2d/Sim2DExport.cpp` | pulsante Calculate |
+| `PolyLinePez` | `sim2d/Sim2DView.cpp` | redraw grafico (clamp `MAX_ELEM_PERM`) |
+
+> Dettaglio storico freeze / build 8ª: sezione [TEST 6](#test-6) e [CAD diag build](#cad-diag-build).
+
+---
+
+### B — `[RT]` display / upload (PegLib — Test 6)
+
+Tutte le define stanno in [`pegenstein/PegLib/PegLib.pro`](../../../Squeeze/pegenstein/PegLib/PegLib.pro) (sezione `DEFINES` in testa). **Mutualmente esclusive** per il path video: usare **solo uno** tra SDL texture (Test 0), `NATIVE_TEXTURE` (Test 5b), `DRM_DIRECT` (Test 6).
+
+#### Tabella rapida — configurazione Test 6 consigliata
+
+| Macro | Test 6 (default attuale) | Effetto se **ON** | Come attivare | Come disattivare |
+|-------|--------------------------|-------------------|---------------|------------------|
+| **`EMBEDDED_HMI_RT_DRM_DIRECT`** | ✅ **ON** | Path Opzione D: dumb buffer RGB565, pageflip DRM, touch evdev; log `[RT] drm:`, `[RT] drm_direct:` | `DEFINES += EMBEDDED_HMI_RT_DRM_DIRECT` | Commentare la riga; **non** usare Test 6 senza alternativa (tornare Test 0 SDL) |
+| **`EMBEDDED_HMI_RT_STATS`** | ✅ **ON** | Ogni ~1 s: `[RT] uploadDirtyRegion: calls=… reqMBps=… updateMs=…` | `DEFINES += EMBEDDED_HMI_RT_STATS` | Commentare la riga in `PegLib.pro` |
+| **`EMBEDDED_HMI_RT_DIAG`** | ❌ **OFF** | Una tantum all’avvio: report driver SDL, texture, formati (`[RT] diag:`) — **solo path SDL** | Decommentare `#DEFINES += EMBEDDED_HMI_RT_DIAG` | Lasciare commentato (inutile con DRM_DIRECT: niente SDL video) |
+| **`EMBEDDED_HMI_RT_SAFE`** | ❌ **OFF** | Coalescing eventi touch/mouse motion | Decommentare `#DEFINES += EMBEDDED_HMI_RT_SAFE` | Lasciare commentato |
+| **`EMBEDDED_HMI_RT_NATIVE_TEXTURE`** | ❌ **OFF** | Test 5b ARGB8888 + conversione esplicita | Decommentare (e **togliere** `DRM_DIRECT`) | Lasciare commentato su Test 6 |
+
+**Snippet `PegLib.pro` — profilo Test 6 produzione + metriche RT:**
+
+```qmake
+DEFINES += EMBEDDED_HMI_RT_STATS
+#DEFINES += EMBEDDED_HMI_RT_DIAG
+#DEFINES += EMBEDDED_HMI_RT_NATIVE_TEXTURE
+DEFINES += EMBEDDED_HMI_RT_DRM_DIRECT
+#DEFINES += EMBEDDED_HMI_RT_SAFE
+```
+
+Dopo modifica: ricompilare `libPegLib.so` e deploy.
+
+**Verifica path attivo sul target:**
+
+```bash
+strings /opt/Squeeze/libPegLib.so | grep -E 'drm_direct|native_texture|SDL_LockTexture'
+# Test 6 atteso: [RT] drm_direct: Opzione D ...
+# Test 0: nessuna delle stringhe sopra (o solo path SDL classico)
+
+strings /opt/Squeeze/libPegLib.so | grep '\[RT\] uploadDirtyRegion'
+# presente se EMBEDDED_HMI_RT_STATS=ON
+```
+
+**Log attesi con STATS ON (esempio):**
+
+```text
+[RT] drm_direct: Opzione D — output DRM dumb RGB565, SDL solo eventi
+[RT] PegLib build … …
+[RT] rtos.ini XRes=… → framebuffer effettivo … @ 16 bpp = … MiB
+[RT] drm: modeset OK, dumb buffer RGB565 attivo (Opzione D POC)
+[RT] uploadDirtyRegion: calls=… req=…MB reqMBps=… updateMs=… effMBps=… maxRectPx=…
+```
+
+Per **silenziare solo le metriche periodiche** ma tenere Test 6: commentare `EMBEDDED_HMI_RT_STATS` (restano i log una-tantum di avvio DRM se presenti nel codice).
+
+---
+
+### C — `[RT] crashdiag` (backtrace su segfault)
+
+**Sempre compilato** con `PEG_USE_LVGL`: `peg_crashdiag.cpp` in `PegLib.pro`, installato da `PegCrashDiagInstall()` in `peg_run.cpp` all’avvio.
+
+| Comportamento | Output |
+|---------------|--------|
+| Avvio | `[RT] crashdiag: handler SIGSEGV/SIGABRT/SIGBUS + __stack_chk_fail attivo` |
+| Crash | `[RT] FATAL … — backtrace (N frame):` + stack |
+
+**Disattivare** (solo se serve stderr minimo assoluto):
+
+1. Commentare la chiamata in `peg_run.cpp`: `PegCrashDiagInstall();`
+2. Opzionale: rimuovere `peg_crashdiag.cpp` da `SOURCES` in `PegLib.pro`
+
+**Consiglio:** lasciare **attivo** in Test 6 — costo trascurabile, utile senza core dump su target.
+
+---
+
+### D — Checklist deploy diagnostica
+
+| Obiettivo | Azioni |
+|----------|--------|
+| **Produzione Test 6 silenziosa** | `CAD_DIAG` off nei `.pro` sim2d/ottimizzatore · `RT_STATS` off (opzionale) · `RT_DIAG` off · `crashdiag` on (consigliato) |
+| **Campagna misure GUI/RT** | `RT_STATS` on · `CAD_DIAG` off · protocollo in [Protocollo misura](#protocollo-misura-standard) |
+| **Debug crash Calculate** | `CAD_DIAG_CALCULATE` on su cad2d+sim2d+ottimizzatore · riprodurre · ultima riga `[CAD] diag` |
+| **Debug pipeline SDL** (Test 0/5) | `RT_DIAG` on · **non** usare con `DRM_DIRECT` |
+| **Tornare a Test 0 baseline** | Commentare `EMBEDDED_HMI_RT_DRM_DIRECT` · togliere define Test 5b · rebuild PegLib |
+
+**File da copiare sul target dopo rebuild:**
+
+```bash
+cp libPegLib.so* /opt/Squeeze/
+cp libsim2d.so* libottimizzatore.so* libcad2d.so* /opt/Squeeze/   # se toccati
+cp PegExec /opt/Squeeze/                                          # se ricompilato
+```
+
+---
+
+### E — Riepilogo “cosa vedo su stderr e come spegnerlo”
+
+| Messaggio | Spegnere con |
+|-----------|----------------|
+| `[CAD] diag LookForBends: …` | Rimuovere `CAD_DIAG_CALCULATE` da `sim2d.pro` + `ottimizzatore.pro` |
+| `[RT] uploadDirtyRegion: …` | Commentare `EMBEDDED_HMI_RT_STATS` in `PegLib.pro` |
+| `[RT] diag: SDL video driver=…` | Non abilitare `EMBEDDED_HMI_RT_DIAG` (già off su Test 6) |
+| `[RT] drm: …` / `[RT] drm_direct: …` | Normale con Test 6; per meno log solo a init, non c’è switch — sono pochi messaggi all’avvio |
+| `[RT] crashdiag: handler …` | Commentare `PegCrashDiagInstall()` (sconsigliato) |
+| `[RT] FATAL … backtrace` | Solo in caso di crash — non è diagnostica da “spegnere” |
 
 ---
 
