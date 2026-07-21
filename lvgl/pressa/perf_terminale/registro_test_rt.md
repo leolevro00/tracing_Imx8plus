@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-21** (inventario file vs Test 0; banda DDR; multitouch Die Set; Possibili migliorie; font #2; RT 4 h 2026-07-15)
+> Ultimo aggiornamento: **2026-07-21** (ruolo reale LVGL; differenze strutturali Qt/SDL/DRM; inventario file vs Test 0; banda DDR; multitouch Die Set)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -16,6 +16,7 @@
 | [DIAGNOSTICA TEST 6](#diagnostica-test-6) | **In questo file** — come attivare/disattivare ogni macro di trace (`[CAD]`, `[RT]`, crash) |
 | [Banda DDR da `perf`](#banda-ddr-perf) | **In questo file** — metriche `read/write-cycles`, formula MB/s, riposo vs scroll |
 | [Differenze strutturali interfacce](#differenze-strutturali-interfacce) | **In questo file** — confronto Qt vs SDL/Test 0 vs DRM/Test 6 |
+| [Ruolo reale di LVGL](#ruolo-reale-lvgl) | **In questo file** — perché `PEG_USE_LVGL` non significa “GUI LVGL”; cosa fanno `lv_init` / `pumpLvgl` / `lv_timer_handler` |
 | [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
 
 ---
@@ -2575,6 +2576,125 @@ In altre parole: non è una semplice attivazione/disattivazione di macro, ma un 
 | Test 6 video / DRM / evdev / stats `[RT]` | **alta** | **no, non direttamente** |
 | Fix CAD / Calculate / Optimize | bassa | **sì** |
 | Font #2 (`kvuib`) | nulla | **sì** |
+
+---
+
+<a id="ruolo-reale-lvgl"></a>
+
+## Ruolo reale di LVGL (Test 0 / path embedded)
+
+> Domanda tipica: *“Se disegno con PEG e mostro con SDL, dove stanno le LVGL?”*  
+> Risposta breve: **nella pipeline grafica che conta, non ci sono.**
+
+### Chi fa cosa (onesto)
+
+| Pezzo | Ruolo reale |
+|-------|-------------|
+| **PEG** | widget, bottoni, grafici, ridisegno → `g_pyBitmap` |
+| **SDL** (Test 0) o **DRM** (Test 6) | input + portare i pixel a schermo |
+| **LVGL** | quasi niente di utile per l’HMI |
+
+Schema Test 0:
+
+```text
+Touch
+  → SDL (eventi)
+  → PEG (logica + disegno)
+  → g_pyBitmap (RAM)
+  → SDL_UpdateTexture / RenderPresent
+  → schermo
+
+LVGL: lv_init + lv_timer_handler  … e basta (scollegato)
+```
+
+### Perché tutti dicono “LVGL”?
+
+Perché la macro di build si chiama **`PEG_USE_LVGL`**.
+
+Quel nome è **fuorviante**. Non significa “disegniamo con LVGL”. Significa:
+
+> non usare Qt; usa il backend embedded Linux (classe `PegLvglWindow`, SDL, poi DRM).
+
+È il nome del **ramo di compilazione**, non del motore grafico.
+
+| Macro | Classe host | Significato reale |
+|-------|-------------|-------------------|
+| `PEG_USE_QT` | `PegMainWindow` | path Qt classico |
+| `PEG_USE_LVGL` | `PegLvglWindow` | path embedded non-Qt (SDL / DRM) |
+
+Anche il nome `PegLvglWindow` è storico: “finestra del path non-Qt”, **non** “finestra che disegna con LVGL”.
+
+### Cosa fa il codice LVGL nel loop
+
+All’avvio:
+
+```cpp
+lv_init();   // inizializza lo stato interno della libreria LVGL
+```
+
+Nel loop principale (`peg_run.cpp`, ogni ~10 ms):
+
+```text
+processEvents()           // touch / SDL / evdev
+processPendingUpdates()   // upload dirty PEG → SDL/DRM
+flushPresent()            // pageflip / present
+pumpLvgl()                // ← solo questo
+Sleep(10)
+```
+
+`pumpLvgl()` nel vostro codice è solo:
+
+```cpp
+void PegLvglWindow::pumpLvgl()
+{
+    lv_timer_handler();
+}
+```
+
+#### Cosa fa `lv_timer_handler()`
+
+In LVGL è il **super-loop interno**: scorre la lista dei **timer LVGL** registrati e ne esegue quelli scaduti.
+
+In una GUI LVGL vera lì tipicamente girano:
+
+- animazioni
+- refresh display LVGL
+- lettura input LVGL (`lv_indev`)
+- task periodici dei widget
+
+Nel **vostro** caso, invece:
+
+1. `lv_init()` crea lo stato interno  
+2. **non** create `lv_display_create` / driver display LVGL  
+3. **non** create widget (`lv_btn`, `lv_label`, …)  
+4. **non** create input LVGL (`lv_indev`)
+
+Quindi la lista timer è **vuota o quasi**. `lv_timer_handler()` entra, guarda la lista, non trova lavoro utile per l’HMI, esce.
+
+| Chiamata | Effetto reale sull’HMI PEG+SDL/DRM |
+|----------|-------------------------------------|
+| `lv_init()` | alloca stato interno LVGL |
+| `pumpLvgl()` → `lv_timer_handler()` | gira timer LVGL; senza GUI LVGL ≈ **no-op** |
+
+Non disegna bottoni, non tocca `g_pyBitmap`, non chiama SDL, non fa pageflip.
+
+### Analogia
+
+Avete acceso un motore LVGL in garage (`lv_init`) e ogni 10 ms girate la chiave (`lv_timer_handler`), ma:
+
+- non avete collegato il cruscotto (display LVGL)
+- non avete collegato il volante (input LVGL)
+- non avete messo passeggeri (widget LVGL)
+
+La macchina “gira a vuoto”. Chi guida e chi mostra lo schermo restano **PEG** e **SDL/DRM**.
+
+### Frase da usare verso terzi
+
+> L’interfaccia non è LVGL. È **PEG → framebuffer → SDL** (Test 0) o **PEG → framebuffer → DRM** (Test 6).  
+> `PEG_USE_LVGL` è solo il nome della build embedded senza Qt.  
+> LVGL è linkato e inizializzato (`lv_init` + `lv_timer_handler`), ma **non gestisce GUI, input né display**.
+
+Vedi anche [Differenze strutturali interfacce](#differenze-strutturali-interfacce) e il documento `pipeline_peg_sdl_drm_rt.md` (§ ruolo LVGL).
 
 ---
 
