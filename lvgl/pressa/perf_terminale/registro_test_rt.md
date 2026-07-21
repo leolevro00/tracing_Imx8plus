@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-21** (ruolo reale LVGL; differenze strutturali Qt/SDL/DRM; inventario file vs Test 0; banda DDR; multitouch Die Set)
+> Ultimo aggiornamento: **2026-07-21** (cgroups `cpu` non disponibile su avn8mp; ruolo LVGL; differenze strutturali; inventario file; banda DDR Test 0 vs 6)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -17,6 +17,7 @@
 | [Banda DDR da `perf`](#banda-ddr-perf) | **In questo file** — metriche `read/write-cycles`, formula MB/s, riposo vs scroll |
 | [Differenze strutturali interfacce](#differenze-strutturali-interfacce) | **In questo file** — confronto Qt vs SDL/Test 0 vs DRM/Test 6 |
 | [Ruolo reale di LVGL](#ruolo-reale-lvgl) | **In questo file** — perché `PEG_USE_LVGL` non significa “GUI LVGL”; cosa fanno `lv_init` / `pumpLvgl` / `lv_timer_handler` |
+| [Cgroups CPU non disponibile](#cgroups-cpu-non-disponibile) | **In questo file** — perché non si può fare quota 10 ms con `cpu.max` su avn8mp (dimostrazione comandi/output) |
 | [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
 
 ---
@@ -2739,6 +2740,135 @@ La macchina “gira a vuoto”. Chi guida e chi mostra lo schermo restano **PEG*
 > LVGL è linkato e inizializzato (`lv_init` + `lv_timer_handler`), ma **non gestisce GUI, input né display**.
 
 Vedi anche [Differenze strutturali interfacce](#differenze-strutturali-interfacce) e il documento `pipeline_peg_sdl_drm_rt.md` (§ ruolo LVGL).
+
+---
+
+<a id="cgroups-cpu-non-disponibile"></a>
+
+## Cgroups CPU non disponibile su avn8mp (2026-07-21)
+
+### Motivazione dell’esperimento
+
+Idea del professore: limitare i task “incriminati” (in primis **`PegExec` / GUI**) con un duty-cycle dell’ordine di **~10 ms**, coerente con la scala di fluidità / latenza percepita dall’operatore, usando **cgroups** (`cpu.max` = quota CFS).
+
+Esempio teorico (cgroup v2):
+
+```text
+cpu.max = 10000 20000
+          ↑     ↑
+          10 ms di CPU ogni 20 ms  →  ~50% di un core
+          (= 10 ms ON / 10 ms OFF)
+```
+
+Obiettivo: ridurre interferenza RT (nanosleep / DDR) forzando pause sul lavoro GUI, **senza** rebuild dell’applicazione.
+
+> Le modifiche sotto `/sys/fs/cgroup` sono **volatili** (RAM): al reboot spariscono. Nessun rischio di configurazione persistente se non si scrivono unit systemd / script di boot.
+
+### Esito sul target avn8mp
+
+**Non applicabile:** il controller **`cpu`** non è presente nella gerarchia cgroup v2 di questa immagine. Di conseguenza non esistono `cpu.max` / quota CFS e `echo '+cpu'` fallisce.
+
+### Dimostrazione — comandi e output (target `root@avn8mp`, 2026-07-21)
+
+#### 1) Controller disponibili in cgroup v2
+
+```bash
+cat /sys/fs/cgroup/cgroup.controllers
+cat /sys/fs/cgroup/cgroup.subtree_control
+mount | grep cgroup
+```
+
+**Output osservato:**
+
+```text
+cpuset io
+```
+
+```text
+(vuoto — nessun controller abilitato in subtree_control)
+```
+
+```text
+cgroup2 on /sys/fs/cgroup type cgroup2 (rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot)
+```
+
+**Lettura:** gerarchia **cgroup v2 unificata** montata, ma tra i controller compaiono solo **`cpuset`** e **`io`**. Manca **`cpu`**.
+
+#### 2) Tentativo di abilitare `cpu` (fallisce)
+
+```bash
+echo '+cpu' > /sys/fs/cgroup/cgroup.subtree_control
+```
+
+**Output osservato:**
+
+```text
+echo: write error: Invalid argument
+```
+
+**Lettura:** non è un problema di permessi root. Il kernel rifiuta `+cpu` perché quel controller **non è nella lista** di `cgroup.controllers`.
+
+#### 3) Non c’è nemmeno cgroup v1 `cpu`
+
+```bash
+ls /sys/fs/cgroup/cpu 2>/dev/null
+cat /proc/cmdline | tr ' ' '\n' | grep -i cgroup
+```
+
+**Output osservato:**
+
+```text
+(nessuna directory /sys/fs/cgroup/cpu)
+```
+
+```text
+cgroup_no_v1=all
+```
+
+**Lettura:** cmdline forza **solo v2** (`cgroup_no_v1=all`). Non esiste un piano B su `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` (v1).
+
+#### 4) Causa root in config kernel
+
+```bash
+zcat /proc/config.gz 2>/dev/null | grep -i CGROUP_SCHED
+```
+
+**Output osservato:**
+
+```text
+# CONFIG_CGROUP_SCHED is not set
+```
+
+**Lettura:** il kernel in esecuzione è stato compilato **senza** `CONFIG_CGROUP_SCHED`. Senza quella opzione (e, per `cpu.max`, tipicamente anche `CONFIG_CFS_BANDWIDTH`) il controller di scheduling CPU per cgroups **non viene esposto**.
+
+Sintesi della catena causale:
+
+```text
+CONFIG_CGROUP_SCHED not set
+        ↓
+niente controller "cpu" in cgroup.controllers
+        ↓
+echo '+cpu' → Invalid argument
+        ↓
+impossibile creare/usare cpu.max (quota 10 ms)
+```
+
+### Cosa resta fattibile senza rebuild kernel
+
+| Approccio | Disponibile su avn8mp? | Effetto |
+|-----------|------------------------|---------|
+| `cpu.max` / quota CFS 10 ms | **No** | — |
+| `cpuset` (pin PegExec su CPU 0–1 o 0–2) | **Sì** (`cpuset` è in `cgroup.controllers`) | meno core, non duty-cycle 10 ms |
+| `PEG_PRESENT_INTERVAL_MS=10` (rate-limit present in PegLib) | **Sì** | cap refresh ~100 Hz, già nel codice |
+| `Sleep(10)` nel main loop | **Sì** (già presente) | loop host ~100 Hz; non ferma da solo `PegRefresh` sotto carico |
+| `cpulimit` userspace (se in image) | da verificare | approx quota CPU senza cgroup `cpu` |
+| Rebuild kernel con `CONFIG_CGROUP_SCHED=y` (+ `CONFIG_CFS_BANDWIDTH=y`) | solo via BSP/Yocto | abilita davvero `cpu.max` |
+
+### Frase per documentazione / tesi
+
+> Sull’immagine avn8mp in uso (2026-07-21) la proposta di limitare PegExec con cgroups a un duty-cycle ~10 ms **non è realizzabile**: il sistema è in cgroup v2 puro (`cgroup_no_v1=all`), ma `cgroup.controllers` elenca solo `cpuset io`, e la config kernel ha `# CONFIG_CGROUP_SCHED is not set`. Di conseguenza `echo '+cpu'` restituisce `Invalid argument` e non esiste `cpu.max`. Per l’esperimento “~10 ms” si usano leve applicative (`PEG_PRESENT_INTERVAL_MS`) e/o `cpuset`; l’abilitazione del controller `cpu` richiederebbe un kernel con CGROUP_SCHED (e CFS_BANDWIDTH) ricostruito nel BSP.
+
+Script di supporto (opzionale, utile solo se in futuro compare il controller `cpu`): `pressa/perf_terminale/peg_cgroup_throttle.sh`.
 
 ---
 
