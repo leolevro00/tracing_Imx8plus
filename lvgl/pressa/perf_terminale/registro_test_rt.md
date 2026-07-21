@@ -15,6 +15,7 @@
 | `osservazioni` / `test-perf` / `valori_perf.txt` | Note raw `perf` / `htop`; dump DDR cycles → [banda MB/s](#banda-ddr-perf) |
 | [DIAGNOSTICA TEST 6](#diagnostica-test-6) | **In questo file** — come attivare/disattivare ogni macro di trace (`[CAD]`, `[RT]`, crash) |
 | [Banda DDR da `perf`](#banda-ddr-perf) | **In questo file** — metriche `read/write-cycles`, formula MB/s, riposo vs scroll |
+| [Differenze strutturali interfacce](#differenze-strutturali-interfacce) | **In questo file** — confronto Qt vs SDL/Test 0 vs DRM/Test 6 |
 | [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
 
 ---
@@ -2434,6 +2435,148 @@ cp PegExec /opt/Squeeze/                                          # se ricompila
 ---
 
 <a id="file-modificati-vs-test-0"></a>
+
+<a id="differenze-strutturali-interfacce"></a>
+
+## Differenze strutturali interfacce
+
+Questa sezione confronta i **tre host path** usati o discussi durante il lavoro:
+
+1. **Qt classico** (`PEG_USE_QT`)
+2. **SDL / Test 0 baseline** (`PEG_USE_LVGL`, ma con path SDL texture + renderer)
+3. **DRM diretto / Test 6** (`PEG_USE_LVGL` + `EMBEDDED_HMI_RT_DRM_DIRECT`)
+
+L’obiettivo è chiarire **quali passaggi esistono davvero** tra il framebuffer PEG e il pannello, e perché il Test 6 non si “trasferisce” gratis sul path Qt.
+
+### Vista sintetica
+
+```text
+PEG disegna su g_pyBitmap (RAM)
+        │
+        ▼
+   [Qt path]                       [SDL / Test 0]                    [DRM / Test 6]
+   QImage (stessa RAM)             SDL_UpdateTexture()               memcpy → dumb buffer DRM
+        │                           │                                 │
+   QPainter::drawImage             SDL_RenderCopy()                  drmModePageFlip()
+        │                           │                                 │
+   Qt compositor / EGLFS           SDL_RenderPresent()               scanout diretto KMS
+        │                           │
+   GPU / display driver            DRM/KMS / display
+```
+
+### Tabella comparativa
+
+| Aspetto | Qt classico | SDL / Test 0 baseline | DRM diretto / Test 6 |
+|--------|-------------|------------------------|----------------------|
+| Macro build | `PEG_USE_QT` | `PEG_USE_LVGL` | `PEG_USE_LVGL` + `EMBEDDED_HMI_RT_DRM_DIRECT` |
+| Classe host | `PegMainWindow` | `PegLvglWindow` | `PegLvglWindow` + `PegDrmOutput` |
+| Buffer PEG | `g_pyBitmap` / `QImage` in RAM | `g_pyBitmap` in RAM | `g_pyBitmap` in RAM |
+| Passo successivo | `QPainter::drawImage()` | `SDL_UpdateTexture()` | `memcpy` verso dumb buffer |
+| Present finale | Qt / window system | `SDL_RenderPresent()` | `drmModePageFlip()` |
+| Chi controlla il video | Qt | SDL/KMSDRM | codice applicativo |
+| Input touch | eventi Qt (`QMouseEvent` / `QTouchEvent`) | eventi SDL | evdev (`pegdrm_evdev`) |
+| Livello di controllo sul display | medio / astratto | medio | massimo / esplicito |
+
+### 1 — Qt classico (`PEG_USE_QT`)
+
+Nel path Qt, PEG disegna in RAM e la parte host usa una `QImage` come contenitore dei pixel. La visualizzazione vera avviene dentro `paintEvent()` tramite `QPainter::drawImage()`.
+
+Pipeline semplificata:
+
+```text
+PEG
+↓
+g_pyBitmap / QImage
+↓
+QPainter::drawImage()
+↓
+Qt platform plugin / compositor / EGLFS
+↓
+display
+```
+
+**Conseguenza pratica:** l’applicazione non controlla direttamente né il pageflip né il buffer scanout. Il backend video appartiene a Qt.
+
+### 2 — SDL / Test 0 baseline
+
+Questo è il path di riferimento iniziale delle misure RT.
+
+Pipeline semplificata:
+
+```text
+PEG
+↓
+g_pyBitmap
+↓
+uploadDirtyRegion()
+↓
+SDL_UpdateTexture()
+↓
+SDL_RenderCopy()
+↓
+SDL_RenderPresent()
+↓
+DRM/KMS / display
+```
+
+Qui il collo di bottiglia principale osservato è la copia CPU → texture (`SDL_UpdateTexture()`), che aumenta traffico DDR e interferenza RT.
+
+### 3 — DRM diretto / Test 6
+
+Questo path elimina texture SDL e present GPU dalla catena normale di rendering.
+
+Pipeline semplificata:
+
+```text
+PEG
+↓
+g_pyBitmap
+↓
+uploadDirtyRegion()
+↓
+memcpy RGB565 → dumb buffer DRM
+↓
+drmModePageFlip()
+↓
+scanout diretto KMS
+```
+
+L’input touch, in questo caso, non passa più dal video SDL ma da `pegdrm_evdev`.
+
+### Perché il Test 6 non si porta “gratis” su Qt
+
+Il punto chiave è che **Qt e Test 6 non sono due flag sullo stesso ultimo stadio**, ma due **host path diversi**.
+
+| Caso | Cosa cambia |
+|------|-------------|
+| Passare da SDL baseline a Test 6 | si resta dentro `PegLvglWindow`, ma si sostituisce texture/present con DRM diretto |
+| Passare da LVGL/SDL a Qt | si cambia proprio host class: `PegLvglWindow` → `PegMainWindow` |
+
+Quindi il lavoro Test 6:
+
+- vive in `peglvglwindow.cpp`
+- usa `pegdrmoutput.cpp`
+- usa `pegdrm_evdev.cpp`
+- misura `uploadDirtyRegion()` sul path LVGL/SDL/DRM
+
+Sul path Qt questi pezzi **non vengono usati**. Per avere lo stesso beneficio RT con Qt bisognerebbe:
+
+1. decidere se lasciare Qt a video oppure bypassarlo;
+2. portare il present diretto DRM anche dentro l’host Qt;
+3. ridefinire input e sincronizzazione;
+4. riscrivere le metriche RT sul path Qt.
+
+In altre parole: non è una semplice attivazione/disattivazione di macro, ma un **porting del backend host**.
+
+### Conclusione operativa
+
+| Famiglia modifiche | Dipendenza dal path LVGL/SDL/DRM | Portabilità su Qt |
+|--------------------|----------------------------------|-------------------|
+| Test 6 video / DRM / evdev / stats `[RT]` | **alta** | **no, non direttamente** |
+| Fix CAD / Calculate / Optimize | bassa | **sì** |
+| Font #2 (`kvuib`) | nulla | **sì** |
+
+---
 
 ## File modificati vs Test 0
 
