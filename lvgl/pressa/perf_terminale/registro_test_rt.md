@@ -993,7 +993,8 @@ Esempio: `1_064_521` read-cycles in `0,100` s → `(1_064_521 × 8) / 0,100 / 1e
 
 ##### Risultati (Test 6, target avn8mp, 2026-07-20)
 
-Due run da ~10 s / 100 campioni (`-I 100`), stesso fattore ×8.
+Due run da ~10 s / 100 campioni (`-I 100`), stesso fattore ×8.  
+File storici: riposo + scroll raccolti in `valori_perf.txt` (sessioni separate, 2026-07-20).
 
 Per ogni intervallo da 0,1 s si calcola `MB/s_read`, `MB/s_write` e `MB/s_totale = read + write`. Poi, **separatamente** su ciascuna delle tre serie da ~100 punti: media, mediana, p95, min e max.
 
@@ -1014,13 +1015,56 @@ Per ogni intervallo da 0,1 s si calcola `MB/s_read`, `MB/s_write` e `MB/s_totale
 
 > **min … max** di una riga = estremi di **quella** serie (solo read, solo write, o totale), non mischiati. Es. Write scroll 10…148 ≠ Totale scroll 89…380.
 
-**Lettura operativa:**
+**Lettura operativa (Test 6):**
 
 - A riposo resta una banda non nulla (~100 MB/s totali): soprattutto **letture di scanout** del display + idle di sistema (write bassa, max ~65 MB/s).
 - In scroll sale soprattutto la **write** (~7× in media; max ~148 MB/s): coerente con burst di `memcpy` PEG→dumb buffer / upload dirty region.
 - La **read** sale ~2,4× (media 85→204; max ~232): più traffico CPU sul framebuffer + scanout continuo.
 - Il picco **totale** ~380 MB/s è R+W nello stesso intervallo da 0,1 s, non il max read sommato al max write (che sarebbero istanti diversi).
 - Ordine di grandezza (~0,3 GB/s medi in scroll) su un bus LPDDR4 tipico ~12,8 GB/s peak → **utilizzo basso** in assoluto, ma il Δ vs riposo è la leva rilevante per interferenza RT (contendere la stessa DDR del task su CPU3).
+
+##### Risultati (Test 0 / branch `lvgl-hmi`, path SDL, 2026-07-21)
+
+Stessa formula (`cycles × 8 / Δt`), stessi ~10 s / 100 campioni.
+
+| File | Scenario |
+|------|----------|
+| `valori_perf_no_iterazioni` | riposo (GUI ferma) |
+| `valori_perf.txt` | scroll grafico |
+
+| Serie (MB/s) | Stat | Riposo (GUI ferma) | Scroll grafico | Δ scroll − riposo |
+|--------------|------|-------------------:|---------------:|------------------:|
+| **Read** | medio | **139** | **315** | **+176** (~2,3×) |
+| | mediana | 118 | 309 | — |
+| | p95 | 176 | 345 | — |
+| | min … max | 108 … 224 | 294 … 411 | — |
+| **Write** | medio | **32** | **198** | **+165** (~6,1×) |
+| | mediana | 10 | 188 | — |
+| | p95 | 61 | 229 | — |
+| | min … max | 7 … 107 | 181 … 281 | — |
+| **Totale** (R+W) | medio | **171** | **513** | **+341** (~3,0×) |
+| | mediana | 129 | 497 | — |
+| | p95 | 238 | 576 | — |
+| | min … max | 116 … 330 | 475 … **692** | picco totale scroll **~692** |
+
+##### Confronto Test 0 (SDL) vs Test 6 (DRM) — stessi scenari
+
+| Metrica (medio, MB/s) | Test 0 SDL | Test 6 DRM | Δ Test6 − Test0 |
+|-----------------------|----------:|----------:|----------------:|
+| Read riposo | 139 | 85 | **−54** |
+| Write riposo | 32 | 18 | **−14** |
+| **Totale riposo** | **171** | **104** | **−67** (~−39%) |
+| Read scroll | 315 | 204 | **−111** |
+| Write scroll | 198 | 124 | **−74** |
+| **Totale scroll** | **513** | **328** | **−185** (~−36%) |
+| Picco totale scroll | ~692 | ~380 | **−312** |
+
+**Lettura operativa del confronto:**
+
+- Su **Test 0 (SDL)** la DDR totale in scroll è ~**513 MB/s** medi (picco ~**692**), vs ~**328** / picco ~**380** su Test 6.
+- Il calo su Test 6 (~**−36%** in scroll) è coerente con l’eliminazione della catena texture SDL / present GLES: meno copie e meno traffico bus a parità di gesto.
+- Anche a **riposo** Test 6 è più basso (~104 vs ~171): meno overhead del path SDL idle.
+- La **write** resta la leva che esplode di più in scroll su entrambi (~6–7×), ma il livello assoluto su Test 0 è più alto (198 vs 124 medi).
 
 ##### Relazione con le metriche GUI `[RT]`
 
