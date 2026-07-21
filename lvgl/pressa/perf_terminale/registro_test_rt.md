@@ -10,7 +10,7 @@
 |------|-----------|
 | `pipeline_peg_sdl_drm_rt.md` | Architettura pipeline, thread, ruolo LVGL |
 | `analisi_metriche_gui_rt.md` | Significato di `calls`, `reqMBps`, `effMBps`, `maxRectPx`; **`updateMs` per test** → [sezione dedicata](#significato-updateMs) in questo registro |
-| `interferenza_cpu_ddr_idle_vs_interazione.md` | Argomento CPU/DDR vs GPU per la tesi |
+| `interferenza_cpu_ddr_idle_vs_interazione.md` | Analisi interferenza CPU/DDR vs GPU |
 | `riduzione_framebuffer_esperimenti.md` | Opzioni A–E (formato texture, LockTexture, DRM diretto, …) |
 | `osservazioni` / `test-perf` / `valori_perf.txt` | Note raw `perf` / `htop`; dump DDR cycles → [banda MB/s](#banda-ddr-perf) |
 | [DIAGNOSTICA TEST 6](#diagnostica-test-6) | **In questo file** — come attivare/disattivare ogni macro di trace (`[CAD]`, `[RT]`, crash) |
@@ -2733,7 +2733,7 @@ Avete acceso un motore LVGL in garage (`lv_init`) e ogni 10 ms girate la chiave 
 
 La macchina “gira a vuoto”. Chi guida e chi mostra lo schermo restano **PEG** e **SDL/DRM**.
 
-### Frase da usare verso terzi
+### Sintesi
 
 > L’interfaccia non è LVGL. È **PEG → framebuffer → SDL** (Test 0) o **PEG → framebuffer → DRM** (Test 6).  
 > `PEG_USE_LVGL` è solo il nome della build embedded senza Qt.  
@@ -2749,7 +2749,7 @@ Vedi anche [Differenze strutturali interfacce](#differenze-strutturali-interfacc
 
 ### Motivazione dell’esperimento
 
-Idea del professore: limitare i task “incriminati” (in primis **`PegExec` / GUI**) con un duty-cycle dell’ordine di **~10 ms**, coerente con la scala di fluidità / latenza percepita dall’operatore, usando **cgroups** (`cpu.max` = quota CFS).
+Obiettivo proposto: limitare i processi GUI a carico elevato (in primis **`PegExec`**) con un duty-cycle dell’ordine di **~10 ms**, scala tipica di fluidità / latenza percepita dall’operatore HMI, usando **cgroups** (`cpu.max` = quota CFS).
 
 Esempio teorico (cgroup v2):
 
@@ -2864,9 +2864,9 @@ impossibile creare/usare cpu.max (quota 10 ms)
 | `cpulimit` userspace (se in image) | da verificare | approx quota CPU senza cgroup `cpu` |
 | Rebuild kernel con `CONFIG_CGROUP_SCHED=y` (+ `CONFIG_CFS_BANDWIDTH=y`) | solo via BSP/Yocto | abilita davvero `cpu.max` |
 
-### Frase per documentazione / tesi
+### Sintesi
 
-> Sull’immagine avn8mp in uso (2026-07-21) la proposta di limitare PegExec con cgroups a un duty-cycle ~10 ms **non è realizzabile**: il sistema è in cgroup v2 puro (`cgroup_no_v1=all`), ma `cgroup.controllers` elenca solo `cpuset io`, e la config kernel ha `# CONFIG_CGROUP_SCHED is not set`. Di conseguenza `echo '+cpu'` restituisce `Invalid argument` e non esiste `cpu.max`. Per l’esperimento “~10 ms” si usano leve applicative (`PEG_PRESENT_INTERVAL_MS`) e/o `cpuset`; l’abilitazione del controller `cpu` richiederebbe un kernel con CGROUP_SCHED (e CFS_BANDWIDTH) ricostruito nel BSP.
+> Sull’immagine avn8mp in uso (2026-07-21) la limitazione di PegExec con cgroups a un duty-cycle ~10 ms **non è realizzabile**: il sistema è in cgroup v2 puro (`cgroup_no_v1=all`), ma `cgroup.controllers` elenca solo `cpuset io`, e la config kernel ha `# CONFIG_CGROUP_SCHED is not set`. Di conseguenza `echo '+cpu'` restituisce `Invalid argument` e non esiste `cpu.max`. Per l’esperimento a ~10 ms restano leve applicative (`PEG_PRESENT_INTERVAL_MS`) e/o `cpuset`; l’abilitazione del controller `cpu` richiederebbe un kernel con `CONFIG_CGROUP_SCHED` (e `CONFIG_CFS_BANDWIDTH`) ricostruito nel BSP.
 
 Script di supporto (opzionale, utile solo se in futuro compare il controller `cpu`): `pressa/perf_terminale/peg_cgroup_throttle.sh`.
 
