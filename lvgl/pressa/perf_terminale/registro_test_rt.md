@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-20** (banda DDR `perf` riposo vs scroll; fix multitouch Die Set; audit PegBitmap §4; **Possibili migliorie**; font #2; RT **4 h** 2026-07-15)
+> Ultimo aggiornamento: **2026-07-21** (inventario file vs Test 0; banda DDR; multitouch Die Set; Possibili migliorie; font #2; RT 4 h 2026-07-15)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -15,6 +15,7 @@
 | `osservazioni` / `test-perf` / `valori_perf.txt` | Note raw `perf` / `htop`; dump DDR cycles → [banda MB/s](#banda-ddr-perf) |
 | [DIAGNOSTICA TEST 6](#diagnostica-test-6) | **In questo file** — come attivare/disattivare ogni macro di trace (`[CAD]`, `[RT]`, crash) |
 | [Banda DDR da `perf`](#banda-ddr-perf) | **In questo file** — metriche `read/write-cycles`, formula MB/s, riposo vs scroll |
+| [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
 
 ---
 
@@ -2429,6 +2430,144 @@ cp PegExec /opt/Squeeze/                                          # se ricompila
 | `[RT] drm: …` / `[RT] drm_direct: …` | Normale con Test 6; per meno log solo a init, non c’è switch — sono pochi messaggi all’avvio |
 | `[RT] crashdiag: handler …` | Commentare `PegCrashDiagInstall()` (sconsigliato) |
 | `[RT] FATAL … backtrace` | Solo in caso di crash — non è diagnostica da “spegnere” |
+
+---
+
+<a id="file-modificati-vs-test-0"></a>
+
+## File modificati vs Test 0
+
+Inventario dei sorgenti toccati **dalla condizione iniziale di Test 0** allo stato attuale (Test 6 + stabilità CAD + experiment font #2).  
+Baseline git pegenstein: commit `7acaf1d` (*Strumentazione RT e test riduzione risoluzione 800x600*). Branch corrente tipico: `experiment/test6-with-new-font` (PegLib) / `lvgl-hmi` (pressbrakepeg) / `experiment/test6-with-new-font` (kvuib).
+
+> Solo codice “prodotto”. Esclusi artefatti di build (`Makefile`, `.qmake.stash`, …).
+
+### Riepilogo
+
+| Repo | File “veri” | Contenuto |
+|------|------------:|-----------|
+| **pegenstein** | **10** | path DRM Test 6, stats RT, crashdiag, touch evdev |
+| **pressbrakepeg** | **20** | stabilità Calculate/Optimize, `CAD_DIAG`, guard null |
+| **kvuib** | **7** | pulizia build font Chs (rimozione `Yahei_N.cpp` morti) |
+| **doc** | registro + dump | `registro_test_rt.md`, `valori_perf.txt`, … |
+
+Per **solo** il delta PegLib Test 0 → Test 6 (senza CAD/font/doc): i **10 file** della sezione pegenstein.
+
+---
+
+### 1 — `pegenstein` (PegLib / HMI)
+
+Branch: `experiment/test6-with-new-font` (ex `experiment/test6-drm`).
+
+#### Modificati rispetto a Test 0
+
+| File | Ruolo |
+|------|--------|
+| `PegLib/PegLib.pro` | macro `EMBEDDED_HMI_RT_*` (STATS, DRM_DIRECT, …) |
+| `PegLib/peglvglwindow.cpp` | `uploadDirtyRegion`, path DRM, stats `[RT]`, eventi |
+| `PegLib/peglvglwindow.h` | dich. DRM / RT / coalescing |
+| `PegLib/peg_run.cpp` | `PegCrashDiagInstall` + log RT avvio |
+| `Files/avn8mp/rtos.ini` | risoluzione / viewport produzione |
+
+#### Nuovi (non esistevano in Test 0)
+
+| File | Ruolo |
+|------|--------|
+| `PegLib/pegdrmoutput.cpp` / `.h` | Opzione D — dumb buffer RGB565, pageflip, damage tracking |
+| `PegLib/pegdrm_evdev.cpp` / `.h` | touch via `/dev/input/event*` (+ filtro multitouch Die Set) |
+| `PegLib/peg_crashdiag.cpp` / `.h` | backtrace su SIGSEGV/SIGABRT/SIGBUS |
+
+**Da non contare come “lavoro di test”:** `Makefile`, `PegLib/Makefile`, `.qmake.stash`, regole `.cursor/`.
+
+**Deploy tipico:** `libPegLib.so*` (+ `PegExec` se ricompilato) → `/opt/Squeeze/`.
+
+---
+
+### 2 — `pressbrakepeg` (stabilità Calculate / Optimize)
+
+Working tree tipicamente su branch `lvgl-hmi`. Introdotto durante le campagne di validazione Test 6 (crash Calculate, freeze Optimize, diag).
+
+#### Macro / diagnostica / freeze Optimize
+
+| File | Ruolo |
+|------|--------|
+| `IncPPG/CommonConst.h` | macro `CAD_DIAG` / `CAD_DIAG_CALCULATE` |
+| `ottimizzatore/ottimizzatore.pro` | `DEFINES += CAD_DIAG_CALCULATE` (debug; togliere in prod) |
+| `ottimizzatore/Ottcomp.cpp` | trace ciclo ottimizzatore |
+| `ottimizzatore/Ottinit.cpp` | trace init |
+| `ottimizzatore/Ottpunti.cpp` | trace punti |
+| `ottimizzatore/Ottutens.cpp` | trace `LookForBends`, … |
+| `sim2d/sim2d.pro` | `DEFINES += CAD_DIAG_CALCULATE` (debug; togliere in prod) |
+| `sim2d/Ottimdlg.cpp` | dialog Optimize / `THR_ENDSOL` |
+| `sim2d/Sim2DExport.cpp` | trace Calculate / export |
+| `sim2d/Sim2DFrame.cpp` | freeze Optimize / OnOttimizza |
+| `sim2d/Sim2DView.cpp` | `PolyLinePez` / clamp `MAX_ELEM_PERM` |
+| `cad2d/PezzoFrame.cpp` | trace / path Calculate |
+| `cad2d/Pezzoview.cpp` | vista pezzo |
+| `cad2d/Ppgdoc.cpp` | documento CAD |
+| `cad2d/StdAfx.cpp` | init / hook condivisi |
+
+#### Guard null / crash Calculate
+
+| File | Ruolo |
+|------|--------|
+| `cad2d/DraftPieceWnd.cpp` / `.h` | lifetime / null draft window |
+| `cad2d/PezzoDoc.cpp` | bounds-check vista / file |
+| `cad2d/PezzoForm.cpp` | `EditDraw` / `RecGrafPtr` sicuro |
+| `cad2d/PezzoFormLAlpha.cpp` | null check record successivi |
+
+**Deploy tipico:** `libcad2d.so*`, `libsim2d.so*`, `libottimizzatore.so*` → `/opt/Squeeze/`.  
+Vedi anche [DIAGNOSTICA TEST 6](#diagnostica-test-6) per spegnere `CAD_DIAG` in produzione.
+
+---
+
+### 3 — `kvuib` (experiment font #2)
+
+Branch: `experiment/test6-with-new-font`. Commit tipico: *togliere bitmap Yahei embedded ridondanti*.
+
+Rimozione di `Yahei_N.cpp` (morto in build; runtime CHS usa già `.gz`) da:
+
+| File |
+|------|
+| `PegFontChs8/PegFontChs8.pro` |
+| `PegFontChs9/PegFontChs9.pro` |
+| `PegFontChs10/PegFontChs10.pro` |
+| `PegFontChs11/PegFontChs11.pro` |
+| `PegFontChs12/PegFontChs12.pro` |
+| `PegFontChs14/PegFontChs14.pro` |
+| `PegFontChs16/PegFontChs16.pro` |
+
+Dettaglio misure flash: [Experiment font #2](#experiment-font-2) / [Possibili migliorie §6](#pm-font).
+
+**Deploy tipico:** `libPegFontChs*.so*` aggiornate sull’immagine / `/opt/Squeeze/`.
+
+---
+
+### 4 — Documentazione
+
+| File | Ruolo |
+|------|--------|
+| `pressa/perf_terminale/registro_test_rt.md` | questo registro (test, diag, banda DDR, inventario) |
+| `pressa/perf_terminale/valori_perf.txt` | dump `perf` DDR cycles (riposo / scroll) |
+| altri `.md` in `pressa/perf_terminale/` | pipeline, metriche GUI, interferenza CPU/DDR, … |
+
+---
+
+### Come rigenerare l’elenco da git
+
+```bash
+# pegenstein: delta Test 0 → HEAD (escludere Makefile)
+cd Squeeze/pegenstein
+git diff --name-status 7acaf1d..HEAD -- PegLib Files/avn8mp
+
+# pressbrakepeg: working tree campagna stabilità
+cd Squeeze/pressbrakepeg
+git status --porcelain
+
+# kvuib: font #2
+cd Squeeze/kvuib
+git diff --name-status lvgl-hmi...HEAD -- 'PegFontChs*/'
+```
 
 ---
 
