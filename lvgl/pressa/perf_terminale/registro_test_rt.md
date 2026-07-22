@@ -335,6 +335,97 @@ Leve di ottimizzazione (banda DDR, flash, RAM asset) **oltre** ai test di pipeli
 | **Dove si agisce** | Asset / tool di cattura PegBitmap — **non** la profondità di scanout DRM (resta RGB565) |
 | **Si può fare ancora?** | Solo residui minori (icone toolbar 16 bpp RAW ≈ **27 KB** totali). Non è una leva RT/banda display. |
 
+<a id="pegbitmap-rle-spiegazione"></a>
+
+#### Dove sta la compressione: `fooData` e `BMF_RLE`
+
+La compressione **non** è un file `.png`/`.jpg` a parte: è nel PegBitmap. Il campo dati (`fooData` / array `UCHAR`) contiene i pixel **solo se non c’è RLE**; con `BMF_RLE` contiene un **flusso compresso** che PEG decodifica a runtime.
+
+```cpp
+#define BMF_RLE  0x01   // bitmap is RLE encoded  (pegtypes.hpp)
+```
+
+```cpp
+PegBitmap foo = {
+    flags,   // 0 = raw, oppure BMF_RLE = compresso
+    8,       // 8 bpp = indicizzata (palette)
+    w, h,
+    fooData  // raw indici-pixel  OPPURE  stream RLE
+};
+```
+
+**Due leve distinte:**
+
+| Leva | Dove | Significato |
+|------|------|-------------|
+| **Indicizzata** | `bpp = 8` | ogni pixel (decompresso) è un indice palette, 1 byte |
+| **Compressa** | `uFlags |= BMF_RLE` | `fooData` **non** ha necessariamente 1 byte per pixel |
+
+##### Caso 1 — 8 bpp **non** compressa (`flags = 0`)
+
+```cpp
+PegBitmap foo = {
+    0,          // niente RLE
+    8,          // 8 bpp
+    100,
+    50,
+    fooData
+};
+
+UCHAR fooData[] = {
+    3, 3, 3, 5, 5, 2, ...
+};
+```
+
+Qui `fooData` contiene **direttamente** gli indici dei pixel:
+
+- `fooData[0] = 3` → primo pixel usa `palette[3]`
+- `fooData[1] = 3` → secondo pixel usa `palette[3]`
+- …
+
+Con un’immagine 100×50: **100 × 50 = 5000** pixel → senza compressione ≈ **5000 byte** (1 byte = 1 indice-pixel).
+
+##### Caso 2 — 8 bpp **compressa RLE** (`flags = BMF_RLE`)
+
+```cpp
+PegBitmap foo = {
+    BMF_RLE,
+    8,
+    100,
+    50,
+    fooData
+};
+```
+
+`fooData` **non** contiene tutti i 5000 pixel in sequenza: è un flusso che PEG deve **decodificare**.
+
+Esempio concettuale. Pixel originali:
+
+```text
+5 5 5 5 5 2 2 2
+```
+
+Senza compressione:
+
+```cpp
+UCHAR rawData[] = { 5, 5, 5, 5, 5, 2, 2, 2 };
+```
+
+Con RLE (schema semplificato “ripeti N volte il colore C”):
+
+```text
+5, 5, 3, 2
+│  │  │  │
+│  │  │  └─ indice colore 2
+│  │  └──── ripetilo 3 volte
+│  └─────── indice colore 5
+└────────── ripetilo 5 volte
+```
+
+Quindi: **un elemento di `fooData` non corrisponde più a un pixel**; corrisponde a un pezzo dello stream RLE. Il formato esatto dei run è quello implementato da PEG in decode bitmap; l’idea è la stessa (run-length).
+
+> **Nota:** in PEG non c’è un “livello di compressione” tipo JPEG 1–9: la leva è essenzialmente **RLE on/off** (`BMF_RLE`), oltre a scegliere 8 bpp vs 16 bpp.
+
 #### Audit PegBitmap (kvuib + pressbrakepeg, 2026-07-20)
 
 Ambito: inizializzazioni `PegBitmap name = { flags, bpp, w, h, … }` nei sorgenti applicazione (esclusi font `pegfont/` e third_party).
@@ -2986,11 +3077,109 @@ impossibile creare/usare cpu.max (quota 10 ms)
 | `cpulimit` userspace (se in image) | da verificare | approx quota CPU senza cgroup `cpu` |
 | Rebuild kernel con `CONFIG_CGROUP_SCHED=y` (+ `CONFIG_CFS_BANDWIDTH=y`) | solo via BSP/Yocto | abilita davvero `cpu.max` |
 
+### Come abilitare `cpu.max` restando **solo cgroup v2** (rebuild kernel / BSP)
+
+**Sì:** senza quelle `CONFIG_*` non c’è modo userspace di “accendere” il controller `cpu`. Serve **ricompilare (e ridistribuire) il kernel** dell’immagine avn8mp — tipicamente nel **BSP Yocto**, non in `pegenstein`.
+
+**Non** serve (e non conviene) tornare a cgroup v1: avete già `cgroup_no_v1=all`. Obiettivo = **tenere v2 puro** e solo aggiungere il controller `cpu` + bandwidth CFS.
+
+#### 1) Opzioni kernel da abilitare
+
+Nel `defconfig` / fragment della macchina (kernel **6.6.23-rt28** o quello dell’immagine):
+
+| Symbol | Valore | Perché |
+|--------|--------|--------|
+| `CONFIG_CGROUPS` | `y` | già attivo (avete già `cpuset`/`io`) |
+| `CONFIG_CGROUP_SCHED` | **`y`** | espone il controller **`cpu`** |
+| `CONFIG_FAIR_GROUP_SCHED` | **`y`** | scheduling a gruppi per CFS (dipendenza tipica) |
+| `CONFIG_CFS_BANDWIDTH` | **`y`** | abilita **`cpu.max`** (quota/period) |
+| `CONFIG_RT_GROUP_SCHED` | **`n`** (lasciare off) | su PREEMPT_RT + systemd, con RT group sched spesso **non** si riesce ad abilitare `+cpu` finché ci sono task RT fuori dal root cgroup. PegExec è CFS; i task RT (Lnk) restano fuori dal cgroup GUI |
+
+**Non toccare** (per evitare mix v1/v2):
+
+- cmdline: lasciare **`cgroup_no_v1=all`** (solo v2);
+- **non** montare `/sys/fs/cgroup/cpu` legacy;
+- **non** abilitare hybrid hierarchy.
+
+#### 2) Percorso consigliato in Yocto (fragment, non patch a mano sul tree)
+
+Nella **build machine** del BSP (path tipici: `build/`, recipe `linux-imx` / `linux-fslc-rt` / nome usato dal vendor avn8mp):
+
+1. Creare un fragment, es. `recipes-kernel/linux/files/cgroup-cpu-bandwidth.cfg`:
+
+```cfg
+CONFIG_CGROUP_SCHED=y
+CONFIG_FAIR_GROUP_SCHED=y
+CONFIG_CFS_BANDWIDTH=y
+# CONFIG_RT_GROUP_SCHED is not set
+```
+
+2. Collegarlo alla recipe kernel della macchina, es. in un `.bbappend`:
+
+```bitbake
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+SRC_URI:append = " file://cgroup-cpu-bandwidth.cfg "
+```
+
+(Con kernel Yocto moderni i `.cfg` in `SRC_URI` vengono uniti al defconfig; se la recipe usa solo `KBUILD_DEFCONFIG`, seguire la doc del BSP: `DELTA_KERNEL_DEFCONFIG` / `KERNEL_FEATURES` / `configfragments`.)
+
+3. Rebuild **solo** il kernel (+ eventuale image che lo include):
+
+```bash
+# dalla build directory Yocto (adattare MACHINE=… del BSP avn8mp)
+bitbake -c cleansstate virtual/kernel   # opzionale ma evita config stale
+bitbake virtual/kernel
+# oppure immagine completa:
+# bitbake <nome-image-avn8mp>
+```
+
+4. Deploy sul target: `Image`/`Image.gz` + DTB + moduli coerenti (stesso ABI), poi **reboot**.  
+   Metodi tipici: aggiornamento WIC/sdcard, `boot` partition, oppure pacchetto `kernel-image`/`kernel-modules` del feed Yocto — **come già fate per gli altri update kernel del prodotto**.
+
+> I path esatti (`MACHINE`, nome recipe, layout boot) dipendono dal **repo Yocto vendor** (non sono in `pegenstein`). Prima di bitbake: `bitbake -e virtual/kernel | grep -E '^(PREFERRED_PROVIDER_virtual/kernel|MACHINE|KMACHINE)='`.
+
+#### 3) Verifica post-reboot (solo v2)
+
+```bash
+uname -r
+zcat /proc/config.gz | grep -E 'CGROUP_SCHED|CFS_BANDWIDTH|RT_GROUP_SCHED'
+# atteso:
+# CONFIG_CGROUP_SCHED=y
+# CONFIG_CFS_BANDWIDTH=y
+# # CONFIG_RT_GROUP_SCHED is not set
+
+cat /proc/cmdline | tr ' ' '\n' | grep cgroup
+# atteso: cgroup_no_v1=all   (nessun ritorno a v1)
+
+cat /sys/fs/cgroup/cgroup.controllers
+# atteso: ... cpu ...  (oltre a cpuset io)
+
+echo '+cpu' > /sys/fs/cgroup/cgroup.subtree_control
+# atteso: nessun errore
+
+# throttle PegExec ~10 ms ON / 10 ms OFF (= 50% di un core)
+mkdir -p /sys/fs/cgroup/peg_gui_rt
+echo '10000 20000' > /sys/fs/cgroup/peg_gui_rt/cpu.max
+echo $(pidof PegExec) > /sys/fs/cgroup/peg_gui_rt/cgroup.procs
+cat /sys/fs/cgroup/peg_gui_rt/cpu.stat   # nr_throttled / throttled_usec
+```
+
+Oppure lo script già presente: `pressa/perf_terminale/peg_cgroup_throttle.sh start` (funziona solo **dopo** che `cpu.max` esiste).
+
+#### 4) Caveat RT (importanti)
+
+- `cpu.max` limita i task **CFS** (SCHED_OTHER/BATCH) nel cgroup — tipicamente **PegExec**.  
+  **Non** limita i thread **SCHED_FIFO/RR** (es. `COM RTC Handler` / Lnk): restano fuori o non sono soggetti a quella quota.
+- Non mettere i task RT dentro il cgroup GUI throttled (e con `CONFIG_RT_GROUP_SCHED=n` non è necessario per usare `cpu` su CFS).
+- Misurare RT **prima/dopo** con lo stesso protocollo (warm-up 30–60 s, `CAD_DIAG` off).
+
+#### 5) Alternativa se non si vuole rifare tutto il kernel tree a mano
+
+Se il BSP espone già un defconfig editabile: `bitbake -c menuconfig virtual/kernel` → abilitare le stesse voci sotto *General setup → Control Group support → CPU controller* / *Group scheduling for SCHED_OTHER* / *CPU bandwidth provisioning for FAIR_GROUP_SCHED*, salvare, poi `bitbake virtual/kernel`. Preferibile comunque **fragment `.cfg` in layer** così resta riproducibile in CI.
+
 ### Sintesi
 
-> Sull’immagine avn8mp in uso (2026-07-21) la limitazione di PegExec con cgroups a un duty-cycle ~10 ms **non è realizzabile**: il sistema è in cgroup v2 puro (`cgroup_no_v1=all`), ma `cgroup.controllers` elenca solo `cpuset io`, e la config kernel ha `# CONFIG_CGROUP_SCHED is not set`. Di conseguenza `echo '+cpu'` restituisce `Invalid argument` e non esiste `cpu.max`. Per l’esperimento a ~10 ms restano leve applicative (`PEG_PRESENT_INTERVAL_MS`) e/o `cpuset`; l’abilitazione del controller `cpu` richiederebbe un kernel con `CONFIG_CGROUP_SCHED` (e `CONFIG_CFS_BANDWIDTH`) ricostruito nel BSP.
-
-Script di supporto (opzionale, utile solo se in futuro compare il controller `cpu`): `pressa/perf_terminale/peg_cgroup_throttle.sh`.
+> Sull’immagine avn8mp in uso (2026-07-21) la limitazione di PegExec con cgroups a un duty-cycle ~10 ms **non è realizzabile**: il sistema è in cgroup v2 puro (`cgroup_no_v1=all`), ma `cgroup.controllers` elenca solo `cpuset io`, e la config kernel ha `# CONFIG_CGROUP_SCHED is not set`. Di conseguenza `echo '+cpu'` restituisce `Invalid argument` e non esiste `cpu.max`. Per l’esperimento a ~10 ms restano leve applicative (`PEG_PRESENT_INTERVAL_MS`) e/o `cpuset`; l’abilitazione del controller `cpu` richiede un kernel con `CONFIG_CGROUP_SCHED` + `CONFIG_CFS_BANDWIDTH` (e `CONFIG_RT_GROUP_SCHED` off), **tenendo** `cgroup_no_v1=all`, ricostruito nel BSP Yocto — vedi passi sopra.
 
 ---
 
