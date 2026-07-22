@@ -247,7 +247,7 @@ Se il proxy scheduler resta < 100 µs e in futuro un worker mostrasse spike isol
 |---|------|-------|-----------|
 | 1 | Framebuffer Compression (DCC / Prefetch) | ❌ **Non applicabile** su i.MX8MP LCDIF | [→ §1](#pm-dcc) |
 | 2 | Pixel clock display (kernel / DRM) | ⏸️ **Sospeso** — solo via BSP Yocto (fase 0 ✅) | [→ §2](#pm-pixel-clock) |
-| 3 | Profondità di colore (Bpp) | ✅ **Già a 16 bpp** — sotto non praticabile senza refactor | [→ §3](#pm-bpp) |
+| 3 | Profondità di colore (Bpp) | ✅ PEG 16 · scanout 16 **solo Test 6** (SDL=32) | [→ §3](#pm-bpp) · [scanout](#bpp-scanout-drm-16) |
 | 4 | Ottimizzazione immagini (indicizzate / compressi) | ✅ **Già applicata** — audit 2026-07-20; residuo ~tens of KB | [→ §4](#pm-immagini) |
 | 5 | Ridurre cache LVGL | ❌ **Non pertinente** (UI disegnata da PEG) | [→ §5](#pm-lvgl-cache) |
 | 6 | Font — solo caratteri Unicode necessari | 🟡 **Parziale** — pulizia ridondanze Chs ✅; subset Unicode ancora aperto | [→ §6](#pm-font) |
@@ -313,11 +313,11 @@ Leve di ottimizzazione (banda DDR, flash, RAM asset) **oltre** ai test di pipeli
 
 | | |
 |--|--|
-| **Stato** | ✅ **Già in produzione a 16 bpp (RGB565)** |
-| **Dove si agisce** | `rtos.ini` (`Bpp=`, `ForceBPP=True`) + driver PEG DIB |
-| **Fatto / testato** | Path embedded e Test 6 usano già **RGB565**. Log `[RT] … @ 16 bpp`. Alternativa `Bpp=24` esiste ma **aumenta** i byte (+50%). Formati 8/1/4 non usabili sul path attuale. |
-| **Si può fare?** | **Scendere sotto 16 bpp: no** senza refactor del pipeline colore PEG/SDL/DRM. Restare a 16 e ridurre risoluzione (Test 4 ✅) o asset: sì. |
-| **Dettaglio** | [Profondità di colore (Bpp)](#bpp-gia-fatto) |
+| **Stato** | ✅ PEG **16 bpp**; scanout DRM **16 bpp solo in Test 6** (SDL resta **32**) |
+| **Dove si agisce** | `rtos.ini` (`Bpp=`) = PEG; scanout kernel = FB DRM `RG16` via `PegDrmOutput` |
+| **Fatto / testato** | SDL+KMSDRM: `fb0` a **32 bpp**. Test 6: dumb buffer + `drmModeAddFB2(DRM_FORMAT_RGB565)` → LCDIF a **16**. |
+| **Si può fare?** | **Scendere sotto 16 bpp: no**. Per 16 bpp **sul driver**: path DRM diretto (non basta `Bpp=16` da solo sul path SDL). |
+| **Dettaglio** | [Profondità di colore (Bpp)](#bpp-gia-fatto) · [Scanout DRM a 16 bpp](#bpp-scanout-drm-16) |
 
 ---
 
@@ -680,6 +680,8 @@ PEG RGB565 (16 bpp, RAM)  →  SDL/GLES (conversione + compositing)  →  fb0 sc
 
 > **Chicca:** il plane DRM **sa** fare RG16 (RGB565), ma con **SDL + OpenGL ES2 + KMSDRM** il buffer che legge il LCDIF è **`fb0` a 32 bpp** — circa **il doppio** dei byte sul bus display rispetto a un path RGB565 diretto (es. Test 6 dumb buffer). Il mismatch non è solo “texture vs PEG”, è **PEG 16 bpp → scanout 32 bpp**.
 
+**Come si imposta lo scanout a 16 bpp (userspace → driver):** vedi [Scanout DRM a 16 bpp (Test 6)](#bpp-scanout-drm-16).
+
 **Nota:** `find /sys/class/drm/card1 -name bits_per_pixel` può restare vuoto con SDL/KMSDRM; usare **`/sys/class/graphics/fb0/bits_per_pixel`** come riferimento pratico.
 
 ---
@@ -826,6 +828,8 @@ PEG RGB565 (16 bpp, RAM)  →  SDL/GLES (conversione + compositing)  →  fb0 sc
 
 - `pegdrmoutput.cpp` — probe KMS su tutti i `/dev/dri/card*`, 2 dumb buffer RGB565, `drmModeSetCrtc`, `drmModePageFlip`
 - `pegdrm_evdev.cpp` — touch via `/dev/input/event*` (SDL solo `EVENTS`+`TIMER`)
+
+**Scanout a 16 bpp sul driver `imx-drm` / `lcdifv3`:** dumb buffer `bpp=16` + `drmModeAddFB2(..., DRM_FORMAT_RGB565, …)` — dettaglio e verifica in [Scanout DRM a 16 bpp](#bpp-scanout-drm-16).
 
 **Fix post-POC (stessa build di misura):**
 
@@ -1550,7 +1554,7 @@ strings /opt/Squeeze/libPegLib.so | grep 'stack_chk_fail'
 2. Zoom / dezoom ripetuti sul grafico
 3. Durante redraw, premere **Bend**, **Simulate**, **Rotate**, navigazione toolbar
 4. Se presente finestra CAD draft (stato macchina IMP): spostarla e ripetere **Piega**
-5. **CAD pezzo:** aggiungere linee fino a **40/40** → errore 10008 su 41ª → **Calculate** → pagina Sim2D si apre **senza crash** (7ª build)
+5. **CAD pezzo:** aggiungere linee fino a **40/40** → errore 10008 su 41ª → **Calculate** → pagina Sim2D si apre **senza crash** (7ª build); poi **Add Section** → dialog 10008 → Ok → **nessun crash**, resta sulla sezione corrente (9ª build)
 6. Campagna **≥ 15 min** con monitor RT (`nanosleep` max, `count_ge_100`)
 
 **Riepilogo iterazioni fix `libcad2d` / ottimizzatore (stabilità GUI):**
@@ -1566,6 +1570,20 @@ strings /opt/Squeeze/libPegLib.so | grep 'stack_chk_fail'
 | **6ª rev** | **2026-07-14** | Clamp `SezioniCadGrafico` / `sez = min(..., MAX_GBEND)` — **necessario ma non sufficiente** | stessi file ott + `GetDatiOttPezzo` |
 | **7ª** | **2026-07-14** | **`PolyLinePez`** stack smashing — **`pez_temp[MAX_ELEM_PERM]`** con 40 pieghe (`index_max≈80`, ~82 punti) | **`Sim2DView.cpp`**, **`Ottutens.cpp`**, diagnostica **`CommonConst.h`** (`CAD_DIAG`), **`peg_crashdiag.cpp`** |
 | **8ª** | **2026-07-15** | **Freeze GUI** su chiusura Optimize **`THR_ENDSOL`/`THR_IMPOSS`** — `PpgMessageWindow` in `OnHide()` durante `Execute()` modale; trace `CAD_DIAG` | **`Ottimdlg.cpp`**, **`Sim2DFrame.cpp`**, **`ottimizzatore.pro`**, **`sim2d.pro`**, **`Ottcomp.cpp`** |
+| **9ª** | **2026-07-21** | **SIGSEGV** su **Add Section** a **40/40** dopo dialog **10008** — `ViewGrafSucc` lasciava sezione vuota con `RecGrafPtr()==NULL` → `PopulateTable` / `NumRowTableFromGrafNum` | **`PezzoDoc.cpp`** (rollback), **`PezzoForm.cpp`** (`OnSezSucc`), **`PezzoFormLAlpha.cpp`** (guard NULL/bounds) |
+
+<a id="cad-crash-add-section-10008"></a>
+
+**Crash Add Section @ 40/40 (errore 10008) — 9ª build**
+
+| Campo | Dettaglio |
+|-------|-----------|
+| **Trigger** | CAD pezzo a **Step 40/40** → dialog **Error 10008** (*Too many diagram elements*) → **Add Section** → **SIGSEGV** |
+| **Stack tipico** | `CDeskToolBar::Message` → `CPezzoFrame::Message` → `CPezzoFormLAlpha::PopulateTable` → `NumRowTableFromGrafNum` |
+| **Causa** | Limite **globale** `MAX_GBEND` (40): `InserimentoAbilitato` rifiuta la piega di default della nuova sezione. `ViewGrafSucc` aveva già avanzato la vista e messo `m_pRecG = NULL`; `OnSezSucc` chiamava comunque `PopulateTable()` → deref NULL |
+| **Fix** | Rollback vista in `CPezzoDoc::ViewGrafSucc` se `AggiungiPiega` fallisce; `OnSezSucc` / tastiera L,α non refreshano se fallisce; guard NULL/bounds in `PopulateTable` / `NumRowTableFromGrafNum` |
+| **Deploy** | Rebuild + `cp` **`libcad2d.so*`** su target |
+| **Test** | 40/40 → Add Section → dialog 10008 → Ok → **resta su sezione 1**, niente crash; sotto 40 elementi Add Section continua a funzionare |
 
 **Pipeline:**
 
@@ -2252,15 +2270,65 @@ imx-drm display-subsystem: bound ldb-display-controller (ops imx8mp_ldb_ops)
 
 ### Profondità di colore (Bpp): già fatto + come modificare
 
-**Stato attuale:** lo stack gira già a **16 bpp RGB565** (`Bpp=16` in `rtos.ini`). È la profondità minima praticabile sul path embedded attuale (SDL/KMSDRM + `PEG_USE_LVGL`); l'alternativa **24 bpp** è presente nel file ma **commentata** — raddoppierebbe i byte per pixel del framebuffer PEG e dell'upload.
+**Stato attuale:** il framebuffer **PEG** è a **16 bpp RGB565** (`Bpp=16` in `rtos.ini`). Attenzione: sul path **SDL + KMSDRM** lo **scanout** verso il pannello resta **32 bpp** (vedi [TEST 5](#test-5)); i **16 bpp sul driver display** (`lcdifv3`) si ottengono solo con il path **Test 6** ([sotto](#bpp-scanout-drm-16)). L'alternativa **24 bpp** in ini è commentata — aumenterebbe i byte PEG (+50%).
 
 **Cosa è stato verificato:**
 
-- Config produzione / test: `Bpp=16`, `ForceBPP=True`
+- Config produzione / test: `Bpp=16`, `ForceBPP=True` (PEG in RAM)
 - Log avvio: `[RT] rtos.ini XRes=… YRes=… → framebuffer effettivo … @ 16 bpp = X.XX MiB` (`peg_run.cpp`)
-- Test 4 (800×600) ha ulteriormente ridotto il traffico pixel mantenendo 16 bpp
+- Test 4 (800×600) ha ulteriormente ridotto il traffico pixel mantenendo PEG a 16 bpp
+- Path SDL: `fb0` a **32 bpp**; path Test 6: FB DRM **RGB565 / RG16**
 
-**Modifica rapida del Bpp (senza rebuild)** — solo `rtos.ini` + riavvio `PegExec`:
+<a id="bpp-scanout-drm-16"></a>
+
+#### Come impostare 16 bpp a livello di scanout (userspace → kernel)
+
+Su i.MX8MP **non** c’è un flag DT / `menuconfig` del tipo “forza 16 bpp sul LCDIF”. Il driver **`imx-drm` + `imx-lcdifv3-crtc`** espone i formati supportati (`XR24` = 32 bpp, `RG16` = 16 bpp); il bpp effettivo dello scanout è quello del **framebuffer DRM** attaccato al CRTC/plane.
+
+| Path | Cosa fa `Bpp=16` in `rtos.ini` | Formato scanout (LCDIF) |
+|------|--------------------------------|-------------------------|
+| SDL + GLES + KMSDRM (Test 0 / tipico) | PEG a 16 bpp in RAM | **32 bpp** (`XR24` / `fb0`) |
+| **Test 6** `EMBEDDED_HMI_RT_DRM_DIRECT` | PEG a 16 bpp + blit `memcpy` | **16 bpp** (`DRM_FORMAT_RGB565` / `RG16`) |
+
+**Codice (Test 6) — `PegLib/pegdrmoutput.cpp` (`PegDrmOutput`):**
+
+1. Alloca dumb buffer a **16 bpp**:
+```cpp
+createReq.width  = m_width;
+createReq.height = m_height;
+createReq.bpp    = 16;   // RGB565
+drmIoctl(m_fd, DRM_IOCTL_MODE_CREATE_DUMB, &createReq);
+```
+
+2. Registra il framebuffer DRM come **RGB565** (fourcc → plane `RG16`):
+```cpp
+drmModeAddFB2(m_fd, m_width, m_height,
+    DRM_FORMAT_RGB565, handles, pitches, offsets, &buf.fbId, 0);
+```
+
+3. Modeset / flip sul CRTC (`drmModeSetCrtc`, `drmModePageFlip`) — a quel punto il kernel programma il LCDIF sul FB a 16 bpp.
+
+4. Present: `blitDirtyRegion()` copia RGB565 PEG → dumb buffer back (nessuna conversione a 32 bpp).
+
+**Abilitazione:** macro `EMBEDDED_HMI_RT_DRM_DIRECT` in `PegLib.pro` (branch Test 6), rebuild `libPegLib.so`.
+
+**Verifica sul target** (con PegExec Test 6 in esecuzione):
+
+```bash
+# Capacità plane (deve elencare RG16)
+modetest -M imx-drm -p 2>/dev/null | grep formats
+# → formats: XR24 AR24 RG16 ...
+
+# Bpp dello scanout esposto da fbdev (path SDL tipicamente 32; con DRM diretto dipende dal bridge fb)
+cat /sys/class/graphics/fb0/bits_per_pixel
+
+# Log avvio PegLib: probe card imx-drm + dumb RGB565
+./PegExec 2>&1 | grep -E '\[RT\] drm:'
+```
+
+> **Per il confronto userspace vs kernel:** `Bpp=16` in `rtos.ini` da solo **non** basta a far lavorare il LCDIF a 16 bpp sul path SDL. Serve un FB DRM creato/registrato come `DRM_FORMAT_RGB565` e impostato sul CRTC — come fa `PegDrmOutput` nel Test 6.
+
+**Modifica rapida del Bpp PEG (senza rebuild)** — solo `rtos.ini` + riavvio `PegExec` *(non cambia lo scanout SDL 32 bpp)*:
 
 | File | Azione |
 |------|--------|
