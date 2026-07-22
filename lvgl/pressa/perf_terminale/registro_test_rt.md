@@ -156,6 +156,8 @@ strings libPegLib.so | grep -E 'crashdiag|framebuffer PEG|PegLib build'
 
 **Nota:** questa trappola spiega confronti incoerenti tra commit identici, tra reboot e avvio manuale da terminale, e tra misure “ieri ok / oggi no” con lo stesso codice.
 
+**Altra trappola “ieri ok / oggi no”:** `CAD_DIAG_CALCULATE` attivo (`fprintf`+`fflush` su stderr) → spike RT > 100 µs anche in pochi minuti; con diag off i ritardi tornano normali. Vedi [DIAGNOSTICA TEST 6](#diagnostica-test-6) e nota interferenza RT 2026-07-22.
+
 <a id="rt-metodologia-scheduler"></a>
 
 #### Metodologia misura RT — proxy scheduler (`COM RTC Handler`, CPU3)
@@ -1435,9 +1437,11 @@ Macro definita in `pressbrakepeg/IncPPG/CommonConst.h`:
 | Stato | Comportamento |
 |-------|----------------|
 | **`CAD_DIAG_CALCULATE=0`** (default dal 2026-07-14) | `CAD_DIAG(...)` compilato a no-op — **stderr pulito** in produzione |
-| **`CAD_DIAG_CALCULATE=1`** | ogni chiamata stampa `[CAD] diag …` su stderr con `fflush` |
+| **`CAD_DIAG_CALCULATE=1`** | ogni chiamata stampa `[CAD] diag …` su stderr con `fflush` — **⚠️ interferisce con RT** (vedi sotto) |
 
-> **Attenzione:** con l’ottimizzatore in esecuzione (`Optimization in progress`, dialog STOP/Continue) i log possono essere **continui e molto numerosi** — l’ottimizzatore richiama in loop `CalcolaNewSituaz`, `LookForBends`, redraw Sim2D a ogni piega provata. Usare solo per debug mirato, non in campagne RT lunghe.
+> **Attenzione:** con l’ottimizzatore in esecuzione (`Optimization in progress`, dialog STOP/Continue) i log possono essere **continui e molto numerosi** — l’ottimizzatore richiama in loop `CalcolaNewSituaz`, `LookForBends`, redraw Sim2D a ogni piega provata. Usare solo per debug mirato, **non** in campagne RT lunghe.
+
+> **Interferenza RT (2026-07-22):** attivare `CAD_DIAG` fa salire spike `nanosleep` sopra **100 µs** (es. max 117 µs in ~2 min). Spegnendo le macro i ritardi tornano normali. Dettaglio in [DIAGNOSTICA TEST 6 §A](#diagnostica-test-6).
 
 **Per riabilitare il trace in futuro**, aggiungere `DEFINES += CAD_DIAG_CALCULATE` nei `.pro` delle **tre** librerie che contengono i punti trace (tutte includono `CommonConst.h`):
 
@@ -2063,6 +2067,52 @@ grep -iE 'lcdif|ldb|disp|pix|video_pll' /sys/kernel/debug/clk/clk_summary 2>/dev
 cat /sys/class/drm/card1-LVDS-1/modes 2>/dev/null
 ```
 
+#### Come leggere il pixel clock in `modetest -c`
+
+L’output tipico è:
+
+```text
+modes:
+  index name refresh (Hz) hdisp hss hse htot vdisp vss vse vtot
+#0 1024x600 64.31 1024 1084 1154 1214 600 615 619 634 49500 flags: ; type: preferred, driver
+```
+
+L’**header si ferma a `vtot`**: non c’è una colonna intestata “pixel clock”, ma dopo `vtot` c’è ancora un numero. Allineamento reale:
+
+| Campo | Valore (esempio avn8mp) |
+|--------|-------------------------|
+| index | `#0` |
+| name | `1024x600` |
+| refresh (Hz) | `64.31` |
+| hdisp, hss, hse, htot | `1024 1084 1154 1214` |
+| vdisp, vss, vse, vtot | `600 615 619 634` |
+| **pixel clock** *(non in header)* | **`49500`** ← kHz → **49,5 MHz** |
+| flags / type | `preferred, driver` |
+
+**Fonte ufficiale (non è una convenzione inventata da `modetest`):** UAPI DRM  
+[`include/uapi/drm/drm_mode.h`](https://elixir.bootlin.com/linux/latest/source/include/uapi/drm/drm_mode.h) — `struct drm_mode_modeinfo`:
+
+```c
+__u32 clock;   /* pixel clock in kHz */
+```
+
+`modetest` stampa `mode->clock` subito dopo i timing H/V. Stesso campo in libdrm (`drmModeModeInfo.clock`, in kHz).
+
+**Output più leggibile** (etichette esplicite):
+
+```bash
+modetest -M imx-drm -c 2>/dev/null | awk '
+/^#/ {
+  printf "\nMode:        %s\n", $2
+  printf "Refresh:     %s Hz\n", $3
+  printf "H:           disp=%s  sync_start=%s  sync_end=%s  total=%s\n", $4,$5,$6,$7
+  printf "V:           disp=%s  sync_start=%s  sync_end=%s  total=%s\n", $8,$9,$10,$11
+  printf "Pixel clock: %s kHz  (%.2f MHz)\n", $12, $12/1000.0
+}'
+```
+
+**Controlli indipendenti:** `htot × vtot × refresh ≈ clock` (1214 × 634 × 64,31 ≈ 49,5 MHz) e `grep media_disp2_pix /sys/kernel/debug/clk/clk_summary`.
+
 ### Fase 0 — risultati target avn8mp (2026-07-10)
 
 **Contesto misura:** PegExec **non** in esecuzione (CRTC `fb=0`, DPMS=`Off`). Clock tree coerente col mode dichiarato.
@@ -2392,7 +2442,11 @@ soprattutto con dialog **Optimization in progress** (loop dell’ottimizzatore).
 
 **Meccanismo:** macro `CAD_DIAG(tag, fmt, …)` in `pressbrakepeg/IncPPG/CommonConst.h`. Se `CAD_DIAG_CALCULATE` è **1** a compile-time, ogni chiamata fa `fprintf(stderr, …)` + `fflush`.
 
-#### Disattivare (stderr pulito — produzione)
+> **⚠️ Interferenza RT confermata (2026-07-22):** con `CAD_DIAG_CALCULATE` **attivo**, anche in pochi minuti di test compaiono spike **`nanosleep` / `rtc_handler_us` > 100 µs** (es. max **117 µs**, diversi conteggi sopra soglia). Stesso scenario con macro **commentate / off** → ritardi di nuovo in linea con le campagne Test 6 (max tipicamente ≤ ~100–102 µs).  
+> **Causa:** `fprintf` + **`fflush(stderr)`** su console (SSH/seriale) → I/O bloccante e contesa CPU/DDR con il path RT su CPU3. Non è un “dialog CAD” in sé: sono le **stampe di diagnostica**.  
+> **Regola:** campagne di misura RT / endurance → **`CAD_DIAG` sempre off** (nessun `DEFINES += CAD_DIAG_CALCULATE` nei `.pro`). Usare solo per debug crash Calculate, poi spegnere e rideployare.
+
+#### Disattivare (stderr pulito — produzione / misure RT)
 
 1. Aprire e **commentare o rimuovere** la riga in **entrambi** i file (oggi ancora attivi per debug freeze Optimize):
 
@@ -2520,7 +2574,7 @@ Per **silenziare solo le metriche periodiche** ma tenere Test 6: commentare `EMB
 | Obiettivo | Azioni |
 |----------|--------|
 | **Produzione Test 6 silenziosa** | `CAD_DIAG` off nei `.pro` sim2d/ottimizzatore · `RT_STATS` off (opzionale) · `RT_DIAG` off · `crashdiag` on (consigliato) |
-| **Campagna misure GUI/RT** | `RT_STATS` on · `CAD_DIAG` off · protocollo in [Protocollo misura](#protocollo-misura-standard) |
+| **Campagna misure GUI/RT** | `RT_STATS` on · **`CAD_DIAG` off** (obbligatorio — interferenza RT 2026-07-22) · protocollo in [Protocollo misura](#protocollo-misura-standard) |
 | **Debug crash Calculate** | `CAD_DIAG_CALCULATE` on su cad2d+sim2d+ottimizzatore · riprodurre · ultima riga `[CAD] diag` |
 | **Debug pipeline SDL** (Test 0/5) | `RT_DIAG` on · **non** usare con `DRM_DIRECT` |
 | **Tornare a Test 0 baseline** | Commentare `EMBEDDED_HMI_RT_DRM_DIRECT` · togliere define Test 5b · rebuild PegLib |
