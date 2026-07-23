@@ -3208,17 +3208,19 @@ In parallelo: `watch -n0.5 ./peg_cgroup_throttle.sh status` e monitor RT (Lnk).
 
 È:
 
-\[
-\% = \frac{\text{byte letti + scritti sulla DDR in quell’1 s (tutti i master)}}{\text{banda teorica di picco LPDDR4}} \times 100
-\]
+```text
+%  =  (byte letti + scritti sulla DDR in quell’1 s, tutti i master)
+      /  (banda teorica di picco LPDDR4)
+      ×  100
+```
 
 Su i.MX8MP NXP usa tipicamente un picco teorico ≈ **16 GB/s** (= **16 000 MB/s**) per questa metrica. Quindi:
 
-\[
-\text{MB/s}_{\text{totale}} \approx \frac{\%}{100} \times 16\,000
-\]
+```text
+MB/s_totale  ≈  (% / 100)  ×  16 000
+```
 
-Esempio: **4,5 %** → \(0{,}045 \times 16\,000\) ≈ **720 MB/s** di traffico R+W in quell’intervallo.
+Esempio: **4,5 %** → `0,045 × 16 000` ≈ **720 MB/s** di traffico R+W in quell’intervallo.
 
 Include **tutto**: CPU, LCDIF/scanout, GPU se attiva, DMA, audio, …  
 La % resta ~4% anche con cgroup perché lo **scanout** legge il FB in continuo; PegExec è solo una fetta. Stringere la CPU di PegExec toglie soprattutto le **write** a burst → la % totale scende poco.
