@@ -101,7 +101,8 @@ v2_status() {
 		echo "  pid ${p}: ${cmd}"
 	done < "${path}/cgroup.procs"
 	if [ -f "${path}/cpu.stat" ]; then
-		grep -E 'nr_throttled|throttled_usec' "${path}/cpu.stat" || true
+		echo "cpu.stat:"
+		cat "${path}/cpu.stat"
 	fi
 }
 
@@ -251,6 +252,15 @@ cmd_status() {
 	esac
 }
 
+# [AI] stop+start = nuovo cgroup → cpu.stat riparte da zero
+cmd_reset() {
+	need_root
+	quota_us="${1:-10000}"
+	period_us="${2:-20000}"
+	cmd_stop
+	cmd_start "${quota_us}" "${period_us}"
+}
+
 cmd_detect() {
 	echo "mode=$(detect_mode)"
 	echo "--- mounts ---"
@@ -263,10 +273,12 @@ case "${1:-}" in
 	start)  shift; cmd_start "$@" ;;
 	stop)   cmd_stop ;;
 	status) cmd_status ;;
+	reset)  shift; cmd_reset "$@" ;;
 	detect) cmd_detect ;;
 	*)
-		echo "Usage: sh $0 {start [quota_us period_us]|stop|status|detect}"
-		echo "  default start: 10000 20000   (10ms ON / 10ms OFF)"
+		echo "Usage: sh $0 {start [quota_us period_us]|stop|status|reset [quota_us period_us]|detect}"
+		echo "  default start/reset: 10000 20000   (10ms ON / 10ms OFF)"
+		echo "  reset = stop + start (azzera cpu.stat)"
 		exit 1
 		;;
 esac

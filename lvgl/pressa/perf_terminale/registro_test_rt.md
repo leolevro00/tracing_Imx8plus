@@ -1039,7 +1039,7 @@ GPU non usata (`gc/meminfo` stabile); carico su CPU memcpy + pageflip DRM.
 
 Misura **sistemica** del traffico memoria DDR (tutti i master: CPU, LCDIF/scanout, GPU, …), complementare a `reqMBps` / `effMBps` di `uploadDirtyRegion` (che contano solo la copia GUI PEG→DRM).
 
-##### Comando
+##### Comando (cicli raw — metodo usato nelle campagne 2026-07-20)
 
 ```bash
 perf stat -a -I 100 \
@@ -1054,7 +1054,44 @@ perf stat -a -I 100 \
 | `read-cycles` / `write-cycles` | cicli in cui il controller DDR è occupato in lettura / scrittura |
 | Output | file `valori_perf.txt` (stessa cartella di questo registro) |
 
-##### Metriche usate
+##### Alternativa consigliata NXP — metriche `perf` i.MX8MP (2026-07-23)
+
+Su BSP NXP (kernel 5.x/6.x+) esistono **metriche preconfigurate** che convertono i conteggi in **% utilizzo banda LPDDR4** o in **byte/KB/MB** letti/scritti, senza applicare a mano il fattore `cycles × 8`.
+
+**Elenco metriche sulla board** (`root@avn8mp`):
+
+```bash
+perf list metric
+```
+
+Esempi osservati (underscore; il nome esatto può variare col BSP):
+
+| Metrica | Descrizione tipica |
+|---------|-------------------|
+| `imx8mp_bandwidth_usage.lpddr4` | utilizzo banda LPDDR4 (board EVK / equivalente) |
+| `imx8mp_ddr_read.all` | byte letti da DDR — **tutti** i master |
+| `imx8mp_ddr_read.a53` | byte letti — core A53 |
+| `imx8mp_ddr_read.2d` / `.3d` | byte letti — GPU 2D / 3D |
+| (analoghe `imx8mp_ddr_write.*` se presenti) | scritture per master |
+
+**Monitor continuo (es. ogni 1 s), banda / usage aggregata:**
+
+```bash
+# nome metric come da `perf list metric` sulla vostra image
+perf stat -a -I 1000 -M imx8mp_bandwidth_usage.lpddr4
+
+# oppure (se il BSP espone il nome con trattini — verificare con list):
+# perf stat -a -I 1000 -M imx8mp-lpddr4-bandwidth-usage
+```
+
+**Per confronto A/B cgroup / Test 6:** stesso comando a riposo vs scroll, con/senza `peg_cgroup_throttle.sh`.  
+Le metriche per-master (`*.a53`, `*.2d`, …) aiutano a separare CPU vs GPU vs “all”.
+
+> **Nota naming:** documentazione generica NXP a volte usa trattini (`imx8mp-lpddr4-…`); su avn8mp `perf list metric` ha mostrato forme con **underscore** (`imx8mp_bandwidth_usage.lpddr4`). Usare **sempre** il nome stampato da `perf list metric` sulla board in uso.
+
+**Rapporto col metodo `*-cycles`:** i due approcci misurano la stessa DDR; le metriche NXP sono più comode per %/MB. I numeri storici in questo registro (riposo ~104 MB/s, scroll ~328 MB/s Test 6) restano quelli da `read/write-cycles` ×8.
+
+##### Metriche usate (metodo cycles)
 
 | Evento `perf` | Cosa conta | Direzione |
 |---------------|------------|-----------|
