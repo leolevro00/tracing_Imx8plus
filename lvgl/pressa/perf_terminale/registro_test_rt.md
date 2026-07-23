@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-21** (cgroups `cpu` non disponibile su avn8mp; ruolo LVGL; differenze strutturali; inventario file; banda DDR Test 0 vs 6)
+> Ultimo aggiornamento: **2026-07-23** (cgroup `cpu` abilitato via kernel rebuild; script `peg_cgroup_throttle.sh`; metriche NXP `perf` banda DDR)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -17,7 +17,7 @@
 | [Banda DDR da `perf`](#banda-ddr-perf) | **In questo file** — metriche `read/write-cycles`, formula MB/s, riposo vs scroll |
 | [Differenze strutturali interfacce](#differenze-strutturali-interfacce) | **In questo file** — confronto Qt vs SDL/Test 0 vs DRM/Test 6 |
 | [Ruolo reale di LVGL](#ruolo-reale-lvgl) | **In questo file** — perché `PEG_USE_LVGL` non significa “GUI LVGL”; cosa fanno `lv_init` / `pumpLvgl` / `lv_timer_handler` |
-| [Cgroups CPU non disponibile](#cgroups-cpu-non-disponibile) | **In questo file** — perché non si può fare quota 10 ms con `cpu.max` su avn8mp (dimostrazione comandi/output) |
+| [Cgroups CPU / throttle PegExec](#cgroups-cpu-non-disponibile) | **In questo file** — diagnosi 2026-07-21, rebuild kernel, script `peg_cgroup_throttle.sh` |
 | [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
 
 ---
@@ -3014,9 +3014,9 @@ Obiettivo: ridurre interferenza RT (nanosleep / DDR) forzando pause sul lavoro G
 
 > Le modifiche sotto `/sys/fs/cgroup` sono **volatili** (RAM): al reboot spariscono. Nessun rischio di configurazione persistente se non si scrivono unit systemd / script di boot.
 
-### Esito sul target avn8mp
+### Esito sul target avn8mp (2026-07-21 — **prima** del rebuild kernel)
 
-**Non applicabile:** il controller **`cpu`** non è presente nella gerarchia cgroup v2 di questa immagine. Di conseguenza non esistono `cpu.max` / quota CFS e `echo '+cpu'` fallisce.
+**Allora non applicabile:** il controller **`cpu`** non era presente nella gerarchia cgroup v2. Di conseguenza non esistevano `cpu.max` / quota CFS e `echo '+cpu'` falliva. (Dopo rebuild 2026-07-23: `cpuset cpu io` — vedi script sotto.)
 
 ### Dimostrazione — comandi e output (target `root@avn8mp`, 2026-07-21)
 
@@ -3201,7 +3201,7 @@ echo $(pidof PegExec) > /sys/fs/cgroup/peg_gui_rt/cgroup.procs
 cat /sys/fs/cgroup/peg_gui_rt/cpu.stat   # nr_throttled / throttled_usec
 ```
 
-Oppure lo script già presente: `pressa/perf_terminale/peg_cgroup_throttle.sh start` (funziona solo **dopo** che `cpu.max` esiste).
+Oppure lo script già presente: `pressa/perf_terminale/peg_cgroup_throttle.sh` (vedi sotto).
 
 #### 4) Caveat RT (importanti)
 
@@ -3214,9 +3214,81 @@ Oppure lo script già presente: `pressa/perf_terminale/peg_cgroup_throttle.sh st
 
 Se il BSP espone già un defconfig editabile: `bitbake -c menuconfig virtual/kernel` → abilitare le stesse voci sotto *General setup → Control Group support → CPU controller* / *Group scheduling for SCHED_OTHER* / *CPU bandwidth provisioning for FAIR_GROUP_SCHED*, salvare, poi `bitbake virtual/kernel`. Preferibile comunque **fragment `.cfg` in layer** così resta riproducibile in CI.
 
+### Script `peg_cgroup_throttle.sh` (2026-07-23)
+
+File: [`pressa/perf_terminale/peg_cgroup_throttle.sh`](peg_cgroup_throttle.sh)
+
+Automatizza enable `+cpu`, creazione cgroup `peg_gui_rt`, `cpu.max`, spostamento di **PegExec**, status e reset stats. Richiede kernel con controller `cpu` (post-rebuild 2026-07-23 su avn8mp: `cgroup.controllers` = `cpuset cpu io`).
+
+#### Deploy sulla board
+
+```bash
+# dal PC (WSL), path tipico:
+scp /home/leolevro/github/lvgl/pressa/perf_terminale/peg_cgroup_throttle.sh \
+  root@avn8mp:/root/
+
+# sulla board:
+sed -i 's/\r$//' /root/peg_cgroup_throttle.sh   # se il file ha CRLF Windows
+chmod +x /root/peg_cgroup_throttle.sh
+```
+
+PegExec deve essere **già in esecuzione** prima di `start` / `reset`.
+
+#### Istruzioni d’uso
+
+```bash
+./peg_cgroup_throttle.sh start                 # default: 10000 20000 (10 ms / 20 ms ≈ 50% di un core)
+./peg_cgroup_throttle.sh start 5000 20000      # quota più stretta (25%)
+./peg_cgroup_throttle.sh start 2000 20000      # aggressivo (10%)
+
+./peg_cgroup_throttle.sh status                # mode, cpu.max, pid, cpu.stat completo
+./peg_cgroup_throttle.sh reset                 # stop + start → azzera cpu.stat (nuovo cgroup)
+./peg_cgroup_throttle.sh reset 5000 20000      # reset con quota custom
+
+./peg_cgroup_throttle.sh stop                  # toglie PegExec dal cgroup e rimuove peg_gui_rt
+./peg_cgroup_throttle.sh detect                # debug mount / controllers
+```
+
+| Comando | Effetto |
+|---------|---------|
+| `start [quota_us period_us]` | `+cpu` su subtree, `mkdir peg_gui_rt`, scrive `cpu.max`, mette `pidof PegExec` in `cgroup.procs` |
+| `status` | stampa path, `cpu.max`, eventuale `cpuset.cpus`, PID, **tutto** `cpu.stat` |
+| `reset […]` | `stop` + `start` — unico modo pratico per **azzerare** `cpu.stat` (i contatori sono cumulativi / read-only) |
+| `stop` | sposta i PID alla root cgroup e `rmdir peg_gui_rt` |
+| `detect` | mode v1/v2 e listing `/sys/fs/cgroup` |
+
+Default senza argomenti su `start`/`reset`: **`10000 20000`** (10 ms CPU ogni 20 ms).
+
+#### Lettura rapida di `cpu.stat`
+
+| Campo | Significato |
+|--------|-------------|
+| `usage_usec` / `user_usec` / `system_usec` | CPU usata dal cgroup (cumulativa, µs) |
+| `nr_periods` | periodi di quota trascorsi |
+| `nr_throttled` / `throttled_usec` | volte / tempo in cui il gruppo ha **sforato** `cpu.max` ed è stato fermato |
+
+Se con `10000 20000` `nr_throttled` resta ~0–1 su migliaia di periodi, la quota è **troppo generosa** rispetto al carico PegExec: provare `5000 20000` o `2000 20000` e drag continuo.
+
+#### Esito validazione board (2026-07-23)
+
+Dopo image `esa-image-qt5-dbg` con kernel rebuild:
+
+```text
+cat /sys/fs/cgroup/cgroup.controllers
+# → cpuset cpu io
+
+./peg_cgroup_throttle.sh start
+# → cpu.max=10000 20000, PegExec in peg_gui_rt
+
+# sotto carico: nr_throttled / throttled_usec > 0  → quota attiva
+```
+
+Le modifiche restano **volatili** al reboot (rifare `start` o mettere lo script in un unit/systemd se serve in produzione).
+
 ### Sintesi
 
-> Sull’immagine avn8mp in uso (2026-07-21) la limitazione di PegExec con cgroups a un duty-cycle ~10 ms **non è realizzabile**: il sistema è in cgroup v2 puro (`cgroup_no_v1=all`), ma `cgroup.controllers` elenca solo `cpuset io`, e la config kernel ha `# CONFIG_CGROUP_SCHED is not set`. Di conseguenza `echo '+cpu'` restituisce `Invalid argument` e non esiste `cpu.max`. Per l’esperimento a ~10 ms restano leve applicative (`PEG_PRESENT_INTERVAL_MS`) e/o `cpuset`; l’abilitazione del controller `cpu` richiede un kernel con `CONFIG_CGROUP_SCHED` + `CONFIG_CFS_BANDWIDTH` (e `CONFIG_RT_GROUP_SCHED` off), **tenendo** `cgroup_no_v1=all`, ricostruito nel BSP Yocto — vedi passi sopra.
+> **2026-07-21:** sull’immagine originale avn8mp la quota `cpu.max` **non** era realizzabile (`cgroup.controllers` solo `cpuset io`, `# CONFIG_CGROUP_SCHED is not set`).  
+> **2026-07-23:** dopo rebuild kernel (`CONFIG_CGROUP_SCHED` + `CONFIG_CFS_BANDWIDTH`, `RT_GROUP_SCHED` off, `cgroup_no_v1=all`) il controller **`cpu`** è presente; PegExec si limita con `cpu.max` via comandi manuali o script **`peg_cgroup_throttle.sh`**. Per misure RT usare protocollo warm-up + `CAD_DIAG` off; per effetto throttle evidente spesso serve quota **più stretta** del 50%.
 
 ---
 
