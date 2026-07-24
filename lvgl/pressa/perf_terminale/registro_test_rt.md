@@ -17,7 +17,7 @@
 | [Banda DDR da `perf`](#banda-ddr-perf) | **In questo file** — metriche `read/write-cycles`, formula MB/s, riposo vs scroll |
 | [Differenze strutturali interfacce](#differenze-strutturali-interfacce) | **In questo file** — confronto Qt vs SDL/Test 0 vs DRM/Test 6 |
 | [Ruolo reale di LVGL](#ruolo-reale-lvgl) | **In questo file** — perché `PEG_USE_LVGL` non significa “GUI LVGL”; cosa fanno `lv_init` / `pumpLvgl` / `lv_timer_handler` |
-| [Cgroups CPU](#cgroups-cpu-non-disponibile) | **In questo file** — da “non disponibile” (2026-07-21) a kernel con `cpu` + campagne quota (2026-07-23) |
+| [Cgroups CPU](#cgroups-cpu-non-disponibile) | **In questo file** — da “non disponibile” (2026-07-21) a kernel con `cpu` + campagne quota; [istruzioni script](#peg-cgroup-throttle-uso) |
 | [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
 
 ---
@@ -3164,7 +3164,7 @@ echo $(pidof PegExec) > /sys/fs/cgroup/peg_gui_rt/cgroup.procs
 cat /sys/fs/cgroup/peg_gui_rt/cpu.stat   # nr_throttled / throttled_usec
 ```
 
-Oppure lo script già presente: `pressa/perf_terminale/peg_cgroup_throttle.sh start` (funziona solo **dopo** che `cpu.max` esiste).
+Oppure lo script già presente: **`pressa/perf_terminale/peg_cgroup_throttle.sh`** — istruzioni complete in [Script peg_cgroup_throttle — uso](#peg-cgroup-throttle-uso).
 
 #### 4) Caveat RT (importanti)
 
@@ -3185,11 +3185,68 @@ Se il BSP espone già un defconfig editabile: `bitbake -c menuconfig virtual/ker
 
 ### Campagna quota PegExec + banda DDR + RT (2026-07-23 / 24)
 
-**Setup comune:** Test 6, scenario **scroll grafico ~10 min**, `CAD_DIAG` off.  
+<a id="peg-cgroup-throttle-uso"></a>
+
+#### Script `peg_cgroup_throttle.sh` — istruzioni d’uso
+
+**File (PC):** `pressa/perf_terminale/peg_cgroup_throttle.sh`  
+**Prerequisito board:** kernel con controller `cpu` (`cat /sys/fs/cgroup/cgroup.controllers` deve contenere `cpu`).  
+**Prerequisito runtime:** `PegExec` già in esecuzione; comandi da lanciare come **root**.
+
+**Copia sulla board:**
+
+```bash
+# da WSL / PC
+scp /home/leolevro/github/lvgl/pressa/perf_terminale/peg_cgroup_throttle.sh root@avn8mp:/root/
+
+# sulla board
+sed -i 's/\r$//' /root/peg_cgroup_throttle.sh   # se arriva da Windows
+chmod +x /root/peg_cgroup_throttle.sh
+```
+
+**Comandi:**
+
+| Comando | Effetto |
+|---------|---------|
+| `./peg_cgroup_throttle.sh detect` | Mostra se cgroup è v1/v2 e i mount |
+| `./peg_cgroup_throttle.sh start` | Attiva throttle su PegExec — default **`10000 20000`** (10 ms ON / 10 ms OFF ≈ **50%** di un core) |
+| `./peg_cgroup_throttle.sh start QUOTA PERIOD` | Stesso, con quota/period in **µs** (es. `5000 20000` = 25%, `2000 20000` = 10%) |
+| `./peg_cgroup_throttle.sh status` | Path cgroup, `cpu.max`, PID PegExec, **tutto** `cpu.stat` |
+| `./peg_cgroup_throttle.sh reset` | `stop` + `start` (default 50%) → **azzera** i contatori `cpu.stat` |
+| `./peg_cgroup_throttle.sh reset QUOTA PERIOD` | Reset con quota scelta |
+| `./peg_cgroup_throttle.sh stop` | Toglie PegExec dal cgroup e rimuove il throttle |
+
+**Significato di `QUOTA PERIOD`:** ogni `PERIOD` µs il gruppo può usare al massimo `QUOTA` µs di CPU CFS (non vale per i thread RT di Lnk).
+
+```text
+10000 20000  →  10 ms / 20 ms  →  ~50% di un core
+ 5000 20000  →   5 ms / 20 ms  →  ~25%
+ 2000 20000  →   2 ms / 20 ms  →  ~10%
+```
+
+**Esempio sessione di misura:**
+
+```bash
+# PegExec già avviato; warm-up GUI ≥ 30–60 s; poi Lnk
+cd /root
+./peg_cgroup_throttle.sh reset 5000 20000          # 25%
+watch -n0.5 ./peg_cgroup_throttle.sh status        # altro terminale
+perf stat -a -I 1000 -M imx8mp_bandwidth_usage.lpddr4
+
+# fine test
+./peg_cgroup_throttle.sh stop
+```
+
+**Note:**
+- Al **reboot** il cgroup sparisce (config volatile): rifare `start`/`reset`.
+- Se `start` fallisce con `cpu.max missing` → controller `cpu` non abilitato (kernel senza `CONFIG_CGROUP_SCHED` / `CFS_BANDWIDTH`).
+- `nr_throttled` / `throttled_usec` in `status` salgono solo se PegExec **sfora** la quota (a riposo possono restare a 0).
+
+---
+
+**Setup campagna sotto:** Test 6 (o 0-SDL), scenario **scroll grafico ~10 min**, `CAD_DIAG` off.  
 **RT:** max `nanosleep` / proxy scheduler su CPU3.  
-**Script:** `pressa/perf_terminale/peg_cgroup_throttle.sh` (`start` / `reset` / `status` / `stop`).  
-**Baseline (test 0):** nessun cgroup `cpu.max` su PegExec.  
-**Test 1–3:** PegExec in `peg_gui_rt`, `cpuset.cpus=0-2`, quota come in tabella.
+**Baseline DRM:** nessun `cpu.max`. **Test con quota:** PegExec in `peg_gui_rt`, `cpuset.cpus=0-2`.
 
 #### Comando `perf` usato (banda totale)
 
