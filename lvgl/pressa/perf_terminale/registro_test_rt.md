@@ -3183,11 +3183,13 @@ Se il BSP espone già un defconfig editabile: `bitbake -c menuconfig virtual/ker
 
 <a id="cgroups-campagna-quota-2026-07-23"></a>
 
-### Campagna quota PegExec + banda DDR + RT (2026-07-23)
+### Campagna quota PegExec + banda DDR + RT (2026-07-23 / 24)
 
-**Setup comune:** Test 6 / PegExec in cgroup `peg_gui_rt`, `cpuset.cpus=0-2`, scenario **scroll grafico ~10 min**, `CAD_DIAG` off.  
+**Setup comune:** Test 6, scenario **scroll grafico ~10 min**, `CAD_DIAG` off.  
 **RT:** max `nanosleep` / proxy scheduler su CPU3.  
-**Script:** `pressa/perf_terminale/peg_cgroup_throttle.sh` (`start` / `reset` / `status`).
+**Script:** `pressa/perf_terminale/peg_cgroup_throttle.sh` (`start` / `reset` / `status` / `stop`).  
+**Baseline (test 0):** nessun cgroup `cpu.max` su PegExec.  
+**Test 1–3:** PegExec in `peg_gui_rt`, `cpuset.cpus=0-2`, quota come in tabella.
 
 #### Comando `perf` usato (banda totale)
 
@@ -3200,7 +3202,7 @@ perf stat -a -I 1000 -M imx8mp_bandwidth_usage.lpddr4
 - `-I 1000` = campione ogni **1 s**  
 - `-M imx8mp_bandwidth_usage.lpddr4` = metrica NXP (%% di utilizzo LPDDR4)
 
-In parallelo: `watch -n0.5 ./peg_cgroup_throttle.sh status` e monitor RT (Lnk).
+In parallelo: `watch -n0.5 ./peg_cgroup_throttle.sh status` (solo test 1–3) e monitor RT (Lnk).
 
 #### Cosa significa la % di `imx8mp_bandwidth_usage.lpddr4`
 
@@ -3225,32 +3227,47 @@ Esempio: **4,5 %** → `0,045 × 16 000` ≈ **720 MB/s** di traffico R+W in
 Include **tutto**: CPU, LCDIF/scanout, GPU se attiva, DMA, audio, …  
 La % resta ~4% anche con cgroup perché lo **scanout** legge il FB in continuo; PegExec è solo una fetta. Stringere la CPU di PegExec toglie soprattutto le **write** a burst → la % totale scende poco.
 
-#### Tabella confronti (quota × throttle × banda × RT)
+#### Tabella confronti (SDL vs DRM + quota cgroup × banda × RT)
 
-| Test | `cpu.max` | Quota ≈ | Throttle (`nr_throttled` / `nr_periods`) | `throttled_usec` | Banda DDR **%** | Banda DDR **MB/s** ≈ `%/100 × 16000` | **nanosleep max (10 min)** |
-|------|-----------|---------|------------------------------------------|-----------------:|----------------:|---------------------------------------:|---------------------------:|
-| **1** | `10000 20000` | **50%** core | quasi mai — 3 / 204 770 (~0%) | ~3 ms | ~**4,4–4,6 %** | ~**704–736 MB/s** | **93 µs** |
-| **2** | `5000 20000` | **25%** | forte — 3371 / 12 404 (~27%) | ~68 s | ~**3,2–4,6 %** | ~**512–736 MB/s** | **91 µs** |
-| **3** | `2000 20000` | **10%** | molto forte — 1546 / 2933 (~53%) | ~30 s | ~**2,5–3,4 %** | ~**400–544 MB/s** | **71 µs** |
+Stesso comando `perf` (`imx8mp_bandwidth_usage.lpddr4`) e stesso scenario **scroll grafico ~10 min**, così i MB/s sono **confrontabili tra loro**.
+
+| Test | Path GUI | `cpu.max` | Quota ≈ | Throttle | Banda DDR **%** | Banda DDR **MB/s** ≈ `%/100 × 16000` | **nanosleep max (10 min)** |
+|------|----------|-----------|---------|----------|----------------:|---------------------------------------:|---------------------------:|
+| **0-SDL** | Test 0 / branch **`lvgl-hmi`** (SDL) | *(nessuno)* | no throttle | — | ~**7,6–13,1 %** | ~**1 216–2 096 MB/s** | **130 µs** |
+| **6-base** | Test 6 DRM | *(nessuno)* | no throttle | — | ~**4,0–4,2 %** | ~**640–672 MB/s** | **99 µs** |
+| **6-50%** | Test 6 DRM | `10000 20000` | **50%** | quasi mai (3/204k) | ~**4,4–4,6 %** | ~**704–736 MB/s** | **93 µs** |
+| **6-25%** | Test 6 DRM | `5000 20000` | **25%** | forte (~27% periodi) | ~**3,2–4,6 %** | ~**512–736 MB/s** | **91 µs** |
+| **6-10%** | Test 6 DRM | `2000 20000` | **10%** | molto forte (~53%) | ~**2,5–3,4 %** | ~**400–544 MB/s** | **71 µs** |
 
 **Calcolo MB/s (stesso per ogni riga):**  
 `MB/s ≈ (percentuale_osservata / 100) × 16000`  
-con `16000 MB/s` = picco teorico LPDDR4 usato dalla metrica NXP (~16 GB/s).  
-I range MB/s nella tabella sono la conversione diretta dei range % osservati da `perf` durante lo scroll.
+con `16000 MB/s` = picco teorico LPDDR4 usato dalla metrica NXP (~16 GB/s).
 
 **Lettura:**
 
-1. Al **50%** la quota **quasi non stringe** → RT già ok (93 µs), poca differenza su DDR (~4,5% ≈ ~720 MB/s).  
-2. Stringendo **25%→10%** il throttle diventa reale e il worst-case RT scende (**93→71 µs**).  
-3. La % / MB/s DDR cala poco: gran parte è **scanout/sistema**, non solo PegExec.  
-4. **Trade-off:** sotto il 25% guadagni RT ma la GUI diventa più “a scatti”. Punto utile per l’esperimento: tra **25% e 10%**, non il 50% iniziale.
+1. **0-SDL vs 6-base (stessa metrica %):** in scroll, SDL usa ~**7,6–13 %** della DDR (~1,2–2,1 GB/s) vs DRM ~**4,0–4,2 %** (~0,64–0,67 GB/s). Coerente col vecchio confronto cycles (SDL più traffico di DRM), ora misurato con lo **stesso** strumento NXP.  
+2. **RT:** SDL **130 µs** vs DRM senza throttle **99 µs** — Test 6 migliora anche il worst-case senza cgroup.  
+3. Su DRM, stringere la quota **25%→10%** porta nanosleep **99 → 91 → 71 µs**; il **50%** cambia poco rispetto a 6-base.  
+4. La % DDR cala poco col throttle: resta dominata da **scanout/sistema**.  
+5. **Trade-off:** sotto ~25% di quota, RT meglio ma GUI più a scatti.
 
-**Comandi ripetitibili (cgroup):**
+**Nota sul vecchio confronto `read/write-cycles`:** quella tabella (SDL ~513 vs DRM ~328 MB/s medi) resta valida come confronto *relativo* col metodo cycles×8; i valori assoluti non coincidono con `% × 16000` perché sono **eventi diversi**. Qui, con `imx8mp_bandwidth_usage.lpddr4` su entrambe le build, il confronto assoluto SDL↔DRM è allineato.
+
+**Comandi ripetitibili:**
 
 ```bash
-./peg_cgroup_throttle.sh reset 10000 20000   # test 1 — 50%
-./peg_cgroup_throttle.sh reset 5000 20000    # test 2 — 25%
-./peg_cgroup_throttle.sh reset 2000 20000    # test 3 — 10%
+# 0-SDL — branch lvgl-hmi, PegExec senza cgroup cpu
+./peg_cgroup_throttle.sh stop 2>/dev/null
+perf stat -a -I 1000 -M imx8mp_bandwidth_usage.lpddr4
+
+# 6-base — Test 6 DRM senza throttle
+./peg_cgroup_throttle.sh stop 2>/dev/null
+perf stat -a -I 1000 -M imx8mp_bandwidth_usage.lpddr4
+
+# 6-50% / 25% / 10%
+./peg_cgroup_throttle.sh reset 10000 20000
+./peg_cgroup_throttle.sh reset 5000 20000
+./peg_cgroup_throttle.sh reset 2000 20000
 perf stat -a -I 1000 -M imx8mp_bandwidth_usage.lpddr4
 ```
 
