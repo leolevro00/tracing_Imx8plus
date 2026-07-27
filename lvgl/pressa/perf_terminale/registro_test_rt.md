@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-27** (campagna 4×30 min: test 1 ✅; test 2 `25000 100000` ⚠️ 111 µs; test 3 `4000 20000` ⚠️ 101 µs)
+> Ultimo aggiornamento: **2026-07-27** (campagna 4×30 min **chiusa**: test 1 ✅; 2–4 ⚠️; intervalli 60–99 in tabella riassuntiva)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -632,15 +632,28 @@ Leve più sane della ripetizione dello shift naïf: risoluzione viewport, meno l
 > **Contesto:** Test **6** DRM + pan/scroll punti **1–3** attivi (punto 4 ritirato). Quattro run endurance da **~mezz’ora** ciascuno per chiudere la validazione RT post-opt.
 >
 > **Obiettivo:** `nanosleep` / `rtc_handler_us` max **≤ 100 µs** (spike **> 100 µs** rari o assenti); DDR stabile; **0 crash**.
+>
+> **Intervalli 60–99 µs:** conteggio dei ritardi “elevati ma sotto soglia” sulle attivazioni totali della finestra — metriche chiave per confrontare la **coda** della distribuzione, non solo il max.
 
-| # | Durata | Scenario / config | `nanosleep` max | Spike **> 100 µs** | Attivazioni | DDR `lpddr4` | Worst `rtc_handler_us` | L2 miss (worst) | Esito |
-|---|--------|-------------------|----------------:|-------------------:|------------:|-------------:|-----------------------:|----------------:|-------|
-| **1** | ~30 min | _da annotare_ (no cgroup / baseline) | **100 µs** | **0** | **631 000** | **~3,3–3,4%** | **100 µs** @ iter **9 268** | **17,34%** | ✅ |
-| **2** | ~12 min* | cgroup PegExec **`25000 100000`** (25% @ period 100 ms) | **111 µs** | **1** | **244 000** | **~3,3–3,6%** | **111 µs** @ iter **11 418** | **27,90%** | ⚠️ |
-| **3** | ~13 min* | cgroup PegExec **`4000 20000`** (20% @ period 20 ms) | **101 µs** | **1** | **274 000** | **~3,7–3,9%** | **101 µs** @ iter **91 662** | **20,88%** | ⚠️ |
-| **4** | ~30 min | — | — | — | — | — | — | — | ⏳ |
+| # | Durata | Scenario / config | Attivazioni | max | **>100** | **60–70** | **71–80** | **81–90** | **91–99** | DDR % | Worst µs | L2 miss | Esito |
+|---|--------|-------------------|------------:|----:|---------:|----------:|----------:|----------:|----------:|------:|---------:|--------:|-------|
+| **1** | ~30 min | no cgroup / baseline | **631 000** | **100** | **0** | **659** | **29** | **20** | **4** | ~3,3–3,4 | **100** @ 9268 | **17,34%** | ✅ |
+| **2** | ~12 min* | cgroup **`25000 100000`** (25% @ 100 ms) | **244 000** | **111** | **1** | **592** | **37** | **6** | **6** | ~3,3–3,6 | **111** @ 11418 | **27,90%** | ⚠️ |
+| **3** | ~13 min* | cgroup **`4000 20000`** (20% @ 20 ms) | **274 000** | **101** | **1** | **392** | **33** | **17** | **4** | ~3,7–3,9 | **101** @ 91662 | **20,88%** | ⚠️ |
+| **4** | ~13 min* | cgroup **`2000 20000`** (10% @ 20 ms) | **280 000** | **101** | **1** | **307** | **12** | **8** | **2** | ~2,5–2,6 | **101** @ 53732 | **16,35%** | ⚠️ |
 
-\*Test 2–3: durata stimata dalla densità att. del test 1 (~21k att./min); non full 30 min.
+\*Test 2–4: durata stimata dalla densità att. del test 1 (~21k att./min); non full 30 min.
+
+**Somma ritardi in coda 60–99 µs** (escluso spill >100):
+
+| # | Σ (60–99) | Σ / attivazioni | Note |
+|---|----------:|----------------:|------|
+| **1** | **712** | **0,113%** | coda più popolata in assoluto (run più lungo) |
+| **2** | **641** | **0,263%** | densità coda **più alta** + spill 111 µs |
+| **3** | **446** | **0,163%** | coda intermedia |
+| **4** | **329** | **0,118%** | coda più magra (simile densità al baseline); DDR più bassa |
+
+> Lettura: il **max** da solo non basta. Gli intervalli dicono *quanti* risvegli RTC sono andati in zona critica (60–99). Il test **4** (`2000 20000`) riduce la coda 60–99 e la DDR%, ma resta **1** spill a **101 µs** — non migliore del baseline sul criterio “zero spill ≤100”.
 
 #### Test 1 / 4 — ~30 min (2026-07-27)
 
@@ -903,7 +916,106 @@ CPI:                  3.735579
 
 > **Conclusione su `4000 20000`:** period corretto (20 ms); worst **101 µs** accettabile come outlier raro, ma **non migliore** del test 1 senza cgroup (100 / 0 spill). Utile come tetto aggressivo in lab; in produzione resta preferibile **no cgroup** o **`10000 20000`**.
 
-> Prossimo: test **4/4**.
+#### Test 4 / 4 — cgroup `2000 20000` (2026-07-27)
+
+**Config PegExec:**
+
+```text
+cpu.max = 2000 20000     # 2 ms CPU / 20 ms  →  ~10% medi, burst max ~2 ms
+cpuset.cpus = 0-2
+```
+
+**Metriche RT** (CPU3):
+
+| Metrica | Valore | vs test 1 | vs test 3 |
+|---------|--------|-----------|-----------|
+| Attivazioni | **280 000** (~13 min) | più corto | ≈ |
+| `nanosleep` min | **12 µs** | ≈ | = |
+| `nanosleep` max | **101 µs** | **+1 µs** | = |
+| Valori **> 100 µs** | **1** | 0 → 1 | = |
+
+**Distribuzione valori elevati** (< 100 µs) — **coda più magra della campagna**:
+
+| Intervallo (µs) | Occorrenze | vs test 1 | vs test 3 |
+|-----------------|----------:|----------:|----------:|
+| 60–70 | **307** | −352 | −85 |
+| 71–80 | **12** | −17 | −21 |
+| 81–90 | **8** | −12 | −9 |
+| 91–99 | **2** | −2 | −2 |
+| **Σ 60–99** | **329** | — | — |
+| **Σ / att.** | **0,118%** | ≈ test 1 (0,113%) | meglio di test 3 (0,163%) |
+
+```text
+valore massimo della nanosleep delle ultime 280000 attivazioni vale = 101
+valore minimo della nanosleep delle ultime 280000 attivazioni vale = 12
+i valori sopra ai 100 us nelle ultime 280000 attivazioni sono = 1
+intervallo 60-70: 307
+intervallo 71-80: 12
+intervallo 81-90: 8
+intervallo 91-99: 2
+```
+
+**Banda DDR** (`imx8mp_bandwidth_usage.lpddr4`):
+
+| Metrica | Valore tipico |
+|---------|---------------|
+| Utilizzo LPDDR4 | **~2,5–2,6%** — **più basso** della campagna (test 1–3 ~3,3–3,9%) |
+
+```text
+axid-write ≈ 115–123 M   axid-read ≈ 279–288 M   → lpddr4 ≈ 2.5–2.6 %
+```
+
+**Peggior iterazione `[WORST rtc_handler_us]`** (CPU3, iter **53 732**):
+
+| Contatore | Valore | vs test 1 |
+|-----------|--------|-----------|
+| `rtc_handler_us` | **101 µs** | +1 µs |
+| L2 miss | **16,35%** | **−1,0 pp** (migliore della campagna) |
+| `bus_access` | 12 209 | −7% |
+| `bus_cycles` | 406 687 | ≈ |
+| `cpu_cycles` | 809 039 | ≈ |
+| Istruzioni | 230 944 | ≈ |
+| IPC | **0,285** | ≈ (0,280) |
+| CPI | **3,503** | ≈ (3,567) |
+
+```text
+Core: CPU3
+[WORST rtc_handler_us]
+Iterazione:           53732
+rtc_handler_us:       101
+l2d_cache:            18657
+l2d_cache_refill:     3050
+L2 cache miss:        16.3478 %
+bus_access:           12209
+bus_cycles:           406687
+bus_access/bus_cycles: 0.030021
+bus_cycles/bus_access: 33.3104
+cpu_cycles:           809039
+istruzioni:           230944
+IPC:                  0.285455
+CPI:                  3.503183
+```
+
+**Lettura breve test 4:**
+
+| Asse | Esito |
+|------|-------|
+| **RT max** | ⚠️ **101 µs**, **1** spill — come test 3, non zero-spill come test 1 |
+| **Coda 60–99** | ✅ **329** occ. / **0,118%** att. — densità simile al baseline, **migliore** di test 2–3 |
+| **DDR %** | ✅ **~2,5–2,6%** — minimo della campagna |
+| **Worst PMU** | ✅ L2 miss **~16%** — migliore della campagna |
+
+#### Sintesi campagna 4 run
+
+| Criterio | Vincitore |
+|----------|-----------|
+| Zero spill >100 + max ≤100 | **Test 1** (baseline, no cgroup) |
+| Coda 60–99 più magra (densità) | **Test 1** ≈ **Test 4** |
+| DDR % più bassa | **Test 4** (`2000 20000`) |
+| L2 miss worst più basso | **Test 4** (16,35%) |
+| Peggiore (max + densità coda) | **Test 2** (`25000 100000`) |
+
+> **Verdetto:** per produzione RT resta **test 1 senza cgroup**. I cgroup con period 20 ms (`4000`/`2000`) migliorano coda/DDR rispetto al period 100 ms, ma **non eliminano** lo spill a 101 µs. Gli **intervalli** restano la metrica da riportare sempre insieme a max/spill.
 
 ---
 
