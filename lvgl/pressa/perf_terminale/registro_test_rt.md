@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-27** (campagna 4×30 min **chiusa**: test 1 ✅; 2–4 ⚠️; intervalli 60–99 in tabella riassuntiva)
+> Ultimo aggiornamento: **2026-07-27** (campagna 4× su `test-6-font-pan-scroll-opt`; confronto UI `test-6-with-new-font` + cgroup `2000 20000` → max **83 µs**, 0 spill)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -20,7 +20,8 @@
 | [Cgroups CPU](#cgroups-cpu-non-disponibile) | **In questo file** — da “non disponibile” (2026-07-21) a kernel con `cpu` + campagne quota; [istruzioni script](#peg-cgroup-throttle-uso) |
 | [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
 | [Ottimizzazioni pan/scroll grafici](#ottimizzazioni-pan-scroll) | **In questo file** — alleggerire drag Die Set / Sim2D / Ottimizza (pressbrakepeg + ruolo PegLib) |
-| [Campagna 4×30 min (2026-07-27)](#campagna-4x30min-2026-07-27) | **In questo file** — validazione RT post pan/scroll 1–3 (4 run × ~mezz’ora) |
+| [Campagna 4×30 min (2026-07-27)](#campagna-4x30min-2026-07-27) | **In questo file** — validazione RT su branch **`experiment/test-6-font-pan-scroll-opt`** |
+| [Confronto branch font / UI](#confronto-branch-test6-font-2026-07-27) | **In questo file** — `pan-scroll-opt` vs **`experiment/test-6-with-new-font`** (stesso cgroup 10%) |
 
 ---
 
@@ -474,7 +475,7 @@ Ambito: inizializzazioni `PegBitmap name = { flags, bpp, w, h, … }` nei sorgen
 | | |
 |--|--|
 | **Stato** | 🟡 **Parziale** |
-| **Fatto / testato** | Misura footprint font sull’immagine; experiment **#2 pulizia build** (`experiment/test6-with-new-font` in kvuib): rimossi `Yahei_N.cpp` morti dalle `libPegFontChs*` (runtime CHS usa già `PegFontTypeYaHeiN.gz`). **Flash Chs: 17,82 → 11,54 MB (−6,28 MB / −6 584 848 B)**. RAM path Yahei **invariata** (glifi usati restano dal `.gz`). |
+| **Fatto / testato** | Misura footprint font sull’immagine; experiment **#2 pulizia build** (`experiment/test-6-with-new-font` in kvuib): rimossi `Yahei_N.cpp` morti dalle `libPegFontChs*` (runtime CHS usa già `PegFontTypeYaHeiN.gz`). **Flash Chs: 17,82 → 11,54 MB (−6,28 MB / −6 584 848 B)**. RAM path Yahei **invariata** (glifi usati restano dal `.gz`). |
 | **Si può fare ancora?** | **Subset Unicode** (ricattura solo glifi usati nelle stringhe UI) → sì, massimo guadagno a lungo termine; serve PEG Font Capture + charset. **SKU EU slim** (non installare lib CJK) → sì su immagini lab EU-only. |
 | **Dettaglio** | [Experiment font #2](#experiment-font-2) |
 
@@ -487,6 +488,8 @@ Ambito: inizializzazioni `PegBitmap name = { flags, bpp, w, h, … }` nei sorgen
 > **Obiettivo:** ridurre ritardo percepito e carico CPU/DDR durante il **drag su e giù** sui grafici che disturbano di più (Die Set / CAD e pagina Ottimizza / Sim2D), senza cambiare la pipeline DRM Test 6.
 >
 > **Branch codice:** `pressbrakepeg` → `experiment/test-6-font-pan-scroll-opt` (parte da `experiment/test-6-with-new-font`).
+>
+> **Nota (2026-07-27):** la [campagna 4× RT](#campagna-4x30min-2026-07-27) è su **`experiment/test-6-font-pan-scroll-opt`**. Confronto con la UI del branch padre **`experiment/test-6-with-new-font`**: [sezione dedicata](#confronto-branch-test6-font-2026-07-27).
 >
 > **Data avvio:** 2026-07-24.  
 > **Stato attuale:** punti **1–3 attivi**; punto **4 ritirato** (fluidità peggiore).
@@ -630,6 +633,8 @@ Leve più sane della ripetizione dello shift naïf: risoluzione viewport, meno l
 ### Campagna validazione RT — **4 × ~30 min** (2026-07-27)
 
 > **Contesto:** Test **6** DRM + pan/scroll punti **1–3** attivi (punto 4 ritirato). Quattro run endurance da **~mezz’ora** ciascuno per chiudere la validazione RT post-opt.
+>
+> **Branch pressbrakepeg (test 1–4):** `experiment/test-6-font-pan-scroll-opt` (UI con opt pan/scroll 1–3).
 >
 > **Obiettivo:** `nanosleep` / `rtc_handler_us` max **≤ 100 µs** (spike **> 100 µs** rari o assenti); DDR stabile; **0 crash**.
 >
@@ -1015,7 +1020,93 @@ CPI:                  3.503183
 | L2 miss worst più basso | **Test 4** (16,35%) |
 | Peggiore (max + densità coda) | **Test 2** (`25000 100000`) |
 
-> **Verdetto:** per produzione RT resta **test 1 senza cgroup**. I cgroup con period 20 ms (`4000`/`2000`) migliorano coda/DDR rispetto al period 100 ms, ma **non eliminano** lo spill a 101 µs. Gli **intervalli** restano la metrica da riportare sempre insieme a max/spill.
+> **Verdetto (su `experiment/test-6-font-pan-scroll-opt`):** per produzione RT resta **test 1 senza cgroup**. I cgroup con period 20 ms (`4000`/`2000`) migliorano coda/DDR rispetto al period 100 ms, ma **non eliminano** lo spill a 101 µs. Gli **intervalli** restano la metrica da riportare sempre insieme a max/spill.
+
+---
+
+<a id="confronto-branch-test6-font-2026-07-27"></a>
+
+### Confronto branch pressbrakepeg — UI “vecchia” vs pan/scroll-opt (2026-07-27)
+
+| Branch | Cosa è |
+|--------|--------|
+| **`experiment/test-6-font-pan-scroll-opt`** | UI dei **test 1–4** sopra (opt pan/scroll punti 1–3) |
+| **`experiment/test-6-with-new-font`** | UI **precedente** / “vecchia interfaccia” (font experiment, **senza** le opt pan/scroll 1–3 del branch successivo) |
+
+**Setup run “vecchia UI”** (stesso cgroup del test 4, per confronto diretto):
+
+```text
+branch pressbrakepeg: experiment/test-6-with-new-font
+cpu.max = 2000 20000     # 10% @ period 20 ms  (come test 4)
+cpuset.cpus = 0-2
+```
+
+#### Risultati — `test-6-with-new-font` + `2000 20000`
+
+| Metrica | Valore |
+|---------|--------|
+| Attivazioni | **248 000** (~12 min*) |
+| `nanosleep` min | **12 µs** |
+| `nanosleep` max | **83 µs** |
+| Valori **> 100 µs** | **0** |
+| DDR `lpddr4` | **~3,0–3,2%** |
+| Worst `rtc_handler_us` | **83 µs** @ iter **66 413** |
+| L2 miss (worst) | **27,43%** |
+
+| Intervallo (µs) | Occorrenze |
+|-----------------|----------:|
+| 60–70 | **201** |
+| 71–80 | **3** |
+| 81–90 | **1** |
+| 91–99 | **0** |
+| **Σ 60–99** | **205** |
+| **Σ / att.** | **0,083%** |
+
+```text
+valore massimo della nanosleep delle ultime 248000 attivazioni vale = 83
+valore minimo della nanosleep delle ultime 248000 attivazioni vale = 12
+i valori sopra ai 100 us nelle ultime 248000 attivazioni sono = 0
+intervallo 60-70: 201
+intervallo 71-80: 3
+intervallo 81-90: 1
+intervallo 91-99: 0
+```
+
+```text
+Core: CPU3
+[WORST rtc_handler_us]
+Iterazione:           66413
+rtc_handler_us:       83
+l2d_cache:            9164
+l2d_cache_refill:     2514
+L2 cache miss:        27.4334 %
+bus_access:           10093
+bus_cycles:           326738
+bus_access/bus_cycles: 0.030890
+bus_cycles/bus_access: 32.3727
+cpu_cycles:           649059
+istruzioni:           151710
+IPC:                  0.233738
+CPI:                  4.278288
+```
+
+#### Confronto diretto — stesso cgroup `2000 20000`
+
+| Metrica | Test 4 (`pan-scroll-opt`) | Vecchia UI (`test-6-with-new-font`) |
+|---------|--------------------------:|-----------------------------------:|
+| Attivazioni | 280 000 | 248 000 |
+| max `nanosleep` | **101** | **83** |
+| spill **>100** | **1** | **0** |
+| 60–70 | 307 | **201** |
+| 71–80 | 12 | **3** |
+| 81–90 | 8 | **1** |
+| 91–99 | 2 | **0** |
+| Σ 60–99 / att. | 0,118% | **0,083%** |
+| DDR % | **~2,5–2,6** | ~3,0–3,2 |
+| L2 miss (worst) | **16,35%** | **27,43%** |
+| Worst µs | 101 @ 53732 | **83** @ 66413 |
+
+> **Lettura:** a parità di `2000 20000`, la **vecchia UI** (`test-6-with-new-font`) ha **max più basso** (83 vs 101), **0 spill** e coda 60–99 più magra; il worst ha però **L2 miss più alto** (~27% vs ~16%) e DDR% un filo più alta. Non è un verdetto “vecchia meglio in assoluto”: scenario/carico GUI possono differire; va ripetuto a **scenario allineato** (stesso scroll/pagina) e idealmente anche **senza cgroup** su entrambi i branch.
 
 ---
 
@@ -3875,7 +3966,7 @@ perf stat -a -I 1000 -M imx8mp_bandwidth_usage.lpddr4
 ## File modificati vs Test 0
 
 Inventario dei sorgenti toccati **dalla condizione iniziale di Test 0** allo stato attuale (Test 6 + stabilità CAD + experiment font #2).  
-Baseline git pegenstein: commit `7acaf1d` (*Strumentazione RT e test riduzione risoluzione 800x600*). Branch corrente tipico: `experiment/test6-with-new-font` (PegLib) / `lvgl-hmi` (pressbrakepeg) / `experiment/test6-with-new-font` (kvuib).
+Baseline git pegenstein: commit `7acaf1d` (*Strumentazione RT e test riduzione risoluzione 800x600*). Branch corrente tipico: `experiment/test-6-with-new-font` (PegLib) / `lvgl-hmi` (pressbrakepeg) / `experiment/test-6-with-new-font` (kvuib).
 
 > Solo codice “prodotto”. Esclusi artefatti di build (`Makefile`, `.qmake.stash`, …).
 
@@ -3894,7 +3985,7 @@ Per **solo** il delta PegLib Test 0 → Test 6 (senza CAD/font/doc): i **10 file
 
 ### 1 — `pegenstein` (PegLib / HMI)
 
-Branch: `experiment/test6-with-new-font` (ex `experiment/test6-drm`).
+Branch: `experiment/test-6-with-new-font` (ex `experiment/test6-drm`).
 
 #### Modificati rispetto a Test 0
 
@@ -3960,7 +4051,7 @@ Vedi anche [DIAGNOSTICA TEST 6](#diagnostica-test-6) per spegnere `CAD_DIAG` in 
 
 ### 3 — `kvuib` (experiment font #2)
 
-Branch: `experiment/test6-with-new-font`. Commit tipico: *togliere bitmap Yahei embedded ridondanti*.
+Branch: `experiment/test-6-with-new-font`. Commit tipico: *togliere bitmap Yahei embedded ridondanti*.
 
 Rimozione di `Yahei_N.cpp` (morto in build; runtime CHS usa già `.gz`) da:
 
@@ -4082,7 +4173,7 @@ DOPO (#2)
 
 ### Cosa abbiamo fatto concretamente (#2)
 
-**Branch:** `experiment/test6-with-new-font` in **kvuib** (twin di pegenstein).
+**Branch:** `experiment/test-6-with-new-font` in **kvuib** (twin di pegenstein).
 
 **Modifica:** da `PegFontChs{8,9,10,11,12,14,16}.pro` rimossi i `SOURCES` `Yahei_N.cpp` (con commento che spiega il load da `.gz`).  
 `PegFontChs18` era già solo-loader (niente embedded da togliere).
