@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-27** (campagna 4×30 min: test 1 ✅; test 2 cgroup `25000 100000` → worst **111 µs**)
+> Ultimo aggiornamento: **2026-07-27** (campagna 4×30 min: test 1 ✅; test 2 `25000 100000` ⚠️ 111 µs; test 3 `4000 20000` ⚠️ 101 µs)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -633,14 +633,14 @@ Leve più sane della ripetizione dello shift naïf: risoluzione viewport, meno l
 >
 > **Obiettivo:** `nanosleep` / `rtc_handler_us` max **≤ 100 µs** (spike **> 100 µs** rari o assenti); DDR stabile; **0 crash**.
 
-| # | Durata | Scenario / config | `nanosleep` max | Spike **> 100 µs** | Attivazioni | DDR `lpddr4` | Worst `rtc_handler_us` | Esito |
-|---|--------|-------------------|----------------:|-------------------:|------------:|-------------:|-----------------------:|-------|
-| **1** | ~30 min | _da annotare_ (no cgroup / baseline) | **100 µs** | **0** | **631 000** | **~3,3–3,4%** | **100 µs** @ iter **9 268** | ✅ |
-| **2** | ~12 min* | cgroup PegExec **`25000 100000`** (25% @ period 100 ms) | **111 µs** | **1** | **244 000** | **~3,3–3,6%** | **111 µs** @ iter **11 418** | ⚠️ |
-| **3** | ~30 min | — | — | — | — | — | — | ⏳ |
-| **4** | ~30 min | — | — | — | — | — | — | ⏳ |
+| # | Durata | Scenario / config | `nanosleep` max | Spike **> 100 µs** | Attivazioni | DDR `lpddr4` | Worst `rtc_handler_us` | L2 miss (worst) | Esito |
+|---|--------|-------------------|----------------:|-------------------:|------------:|-------------:|-----------------------:|----------------:|-------|
+| **1** | ~30 min | _da annotare_ (no cgroup / baseline) | **100 µs** | **0** | **631 000** | **~3,3–3,4%** | **100 µs** @ iter **9 268** | **17,34%** | ✅ |
+| **2** | ~12 min* | cgroup PegExec **`25000 100000`** (25% @ period 100 ms) | **111 µs** | **1** | **244 000** | **~3,3–3,6%** | **111 µs** @ iter **11 418** | **27,90%** | ⚠️ |
+| **3** | ~13 min* | cgroup PegExec **`4000 20000`** (20% @ period 20 ms) | **101 µs** | **1** | **274 000** | **~3,7–3,9%** | **101 µs** @ iter **91 662** | **20,88%** | ⚠️ |
+| **4** | ~30 min | — | — | — | — | — | — | — | ⏳ |
 
-\*Attivazioni ~244k ≈ **~12 min** alla stessa densità del test 1 (~21k att./min); non un full 30 min.
+\*Test 2–3: durata stimata dalla densità att. del test 1 (~21k att./min); non full 30 min.
 
 #### Test 1 / 4 — ~30 min (2026-07-27)
 
@@ -736,8 +736,6 @@ cpu.max = 25000 100000    # 25 ms CPU / 100 ms  →  ~25% medi, burst fino a ~25
 cpuset.cpus = 0-2
 ```
 
-`status` a metà run (es.): `nr_periods≈1029`, `nr_throttled≈10` (~1% periodi), `throttled_usec≈666 ms` — throttle **raro** ma a **pacchi lunghi**.
-
 **Metriche RT** (CPU3):
 
 | Metrica | Valore | vs test 1 |
@@ -817,7 +815,95 @@ CPI:                  4.616316
 
 > **Conclusione su `25000 100000`:** stessa % media del 25% “buono” (`5000 20000` → 91 µs in campagna luglio), ma **period 100 ms** consente burst ~25 ms → peggiora il **worst-case RT** vs baseline senza cgroup. **Non usare in produzione.** Preferire `stop`, oppure `10000 20000` / `5000 20000`.
 
-> Prossimi: test **3/4**, **4/4** (meglio **senza** questo `cpu.max`, o con period **20 000**).
+#### Test 3 / 4 — cgroup `4000 20000` (2026-07-27)
+
+**Config PegExec:**
+
+```text
+cpu.max = 4000 20000     # 4 ms CPU / 20 ms  →  ~20% medi, burst max ~4 ms
+cpuset.cpus = 0-2
+```
+
+**Metriche RT** (CPU3):
+
+| Metrica | Valore | vs test 1 | vs test 2 |
+|---------|--------|-----------|-----------|
+| Attivazioni | **274 000** (~13 min) | più corto | simile |
+| `nanosleep` min | **12 µs** | ≈ | ≈ |
+| `nanosleep` max | **101 µs** | **+1 µs** | **−10 µs** |
+| Valori **> 100 µs** | **1** (≈ **0,0004%**) | 0 → 1 | = 1 |
+
+**Distribuzione valori elevati** (< 100 µs):
+
+| Intervallo (µs) | Occorrenze |
+|-----------------|----------:|
+| 60–70 | 392 |
+| 71–80 | 33 |
+| 81–90 | 17 |
+| 91–99 | 4 |
+
+```text
+valore massimo della nanosleep delle ultime 274000 attivazioni vale = 101
+valore minimo della nanosleep delle ultime 274000 attivazioni vale = 12
+i valori sopra ai 100 us nelle ultime274000 attivazioni sono = 1
+intervallo 60-70: 392
+intervallo 71-80: 33
+intervallo 81-90: 17
+intervallo 91-99: 4
+```
+
+**Banda DDR** (`imx8mp_bandwidth_usage.lpddr4`):
+
+| Metrica | Valore tipico |
+|---------|---------------|
+| Utilizzo LPDDR4 | **~3,7–3,9%** (stabile; leggermente sopra test 1–2) |
+
+```text
+axi-write ≈ 190–206 M   axi-read ≈ 395–417 M   → lpddr4 ≈ 3.7–3.9 %
+```
+
+**Peggior iterazione `[WORST rtc_handler_us]`** (CPU3, iter **91 662**):
+
+| Contatore | Valore | vs test 1 | vs test 2 |
+|-----------|--------|-----------|-----------|
+| `rtc_handler_us` | **101 µs** | +1 µs | **−10 µs** |
+| L2 miss | **20,88%** | +3,5 pp | **−7,0 pp** |
+| `bus_access` | 7 093 | **−46%** | **−66%** |
+| `bus_cycles` | 265 426 | −37% | −50% |
+| `cpu_cycles` | 526 485 | −37% | −50% |
+| Istruzioni | 140 938 | −40% | −39% |
+| IPC | **0,268** | ≈ (0,280) | meglio (0,217) |
+| CPI | **3,736** | ≈ (3,567) | meglio (4,616) |
+
+```text
+Core: CPU3
+[WORST rtc_handler_us]
+Iterazione:           91662
+rtc_handler_us:       101
+l2d_cache:            8481
+l2d_cache_refill:     1771
+L2 cache miss:        20.8820 %
+bus_access:           7093
+bus_cycles:           265426
+bus_access/bus_cycles: 0.026723
+bus_cycles/bus_access: 37.4208
+cpu_cycles:           526485
+istruzioni:           140938
+IPC:                  0.267696
+CPI:                  3.735579
+```
+
+**Lettura breve test 3:**
+
+| Asse | Esito |
+|------|-------|
+| **RT** | ⚠️ max **101 µs**, **1** spill — **molto meglio del test 2** (111), quasi a livello del baseline (100) |
+| **DDR %** | ~**3,7–3,9%** — ancora scanout-dominated |
+| **Worst PMU** | L2 miss **~21%**, `bus_access` **basso** (7k) — picco “leggero” ma ancora 1 µs sopra soglia |
+
+> **Conclusione su `4000 20000`:** period corretto (20 ms); worst **101 µs** accettabile come outlier raro, ma **non migliore** del test 1 senza cgroup (100 / 0 spill). Utile come tetto aggressivo in lab; in produzione resta preferibile **no cgroup** o **`10000 20000`**.
+
+> Prossimo: test **4/4**.
 
 ---
 
