@@ -1,7 +1,7 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-23** (cgroups `cpu.max` campagne 50%/25%/10% + banda `imx8mp_bandwidth_usage.lpddr4`)
+> Ultimo aggiornamento: **2026-07-27** (campagna 4×30 min: test 1 ✅; test 2 cgroup `25000 100000` → worst **111 µs**)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -19,6 +19,8 @@
 | [Ruolo reale di LVGL](#ruolo-reale-lvgl) | **In questo file** — perché `PEG_USE_LVGL` non significa “GUI LVGL”; cosa fanno `lv_init` / `pumpLvgl` / `lv_timer_handler` |
 | [Cgroups CPU](#cgroups-cpu-non-disponibile) | **In questo file** — da “non disponibile” (2026-07-21) a kernel con `cpu` + campagne quota; [istruzioni script](#peg-cgroup-throttle-uso) |
 | [File modificati vs Test 0](#file-modificati-vs-test-0) | **In questo file** — inventario completo dei sorgenti toccati da Test 0 → Test 6 (pegenstein, pressbrakepeg, kvuib, doc) |
+| [Ottimizzazioni pan/scroll grafici](#ottimizzazioni-pan-scroll) | **In questo file** — alleggerire drag Die Set / Sim2D / Ottimizza (pressbrakepeg + ruolo PegLib) |
+| [Campagna 4×30 min (2026-07-27)](#campagna-4x30min-2026-07-27) | **In questo file** — validazione RT post pan/scroll 1–3 (4 run × ~mezz’ora) |
 
 ---
 
@@ -253,6 +255,7 @@ Se il proxy scheduler resta < 100 µs e in futuro un worker mostrasse spike isol
 | 4 | Ottimizzazione immagini (indicizzate / compressi) | ✅ **Già applicata** — audit 2026-07-20; residuo ~tens of KB | [→ §4](#pm-immagini) |
 | 5 | Ridurre cache LVGL | ❌ **Non pertinente** (UI disegnata da PEG) | [→ §5](#pm-lvgl-cache) |
 | 6 | Font — solo caratteri Unicode necessari | 🟡 **Parziale** — pulizia ridondanze Chs ✅; subset Unicode ancora aperto | [→ §6](#pm-font) |
+| 7 | Pan/scroll grafici (Die Set, Sim2D, Ottimizza) | ✅ **Punti 1–3 attivi**; punto 4 ritirato (fluidità) | [→ sezione](#ottimizzazioni-pan-scroll) |
 
 Elenco completo con cosa è stato fatto/testato: [**Possibili migliorie**](#possibili-migliorie).
 
@@ -474,6 +477,347 @@ Ambito: inizializzazioni `PegBitmap name = { flags, bpp, w, h, … }` nei sorgen
 | **Fatto / testato** | Misura footprint font sull’immagine; experiment **#2 pulizia build** (`experiment/test6-with-new-font` in kvuib): rimossi `Yahei_N.cpp` morti dalle `libPegFontChs*` (runtime CHS usa già `PegFontTypeYaHeiN.gz`). **Flash Chs: 17,82 → 11,54 MB (−6,28 MB / −6 584 848 B)**. RAM path Yahei **invariata** (glifi usati restano dal `.gz`). |
 | **Si può fare ancora?** | **Subset Unicode** (ricattura solo glifi usati nelle stringhe UI) → sì, massimo guadagno a lungo termine; serve PEG Font Capture + charset. **SKU EU slim** (non installare lib CJK) → sì su immagini lab EU-only. |
 | **Dettaglio** | [Experiment font #2](#experiment-font-2) |
+
+---
+
+<a id="ottimizzazioni-pan-scroll"></a>
+
+## Ottimizzazioni pan/scroll grafici (pressbrakepeg)
+
+> **Obiettivo:** ridurre ritardo percepito e carico CPU/DDR durante il **drag su e giù** sui grafici che disturbano di più (Die Set / CAD e pagina Ottimizza / Sim2D), senza cambiare la pipeline DRM Test 6.
+>
+> **Branch codice:** `pressbrakepeg` → `experiment/test-6-font-pan-scroll-opt` (parte da `experiment/test-6-with-new-font`).
+>
+> **Data avvio:** 2026-07-24.  
+> **Stato attuale:** punti **1–3 attivi**; punto **4 ritirato** (fluidità peggiore).
+
+### Contesto
+
+Il pan dei grafici era pesante perché a ogni movimento touch l’app **ridisegnava troppo e troppo spesso**. PegLib poi caricava dirty region enormi → più CPU/DDR → più ritardo sul task RT (`rtc_handler_us` / `nanosleep`).
+
+| Layer | Ruolo nel pan |
+|--------|----------------|
+| **pressbrakepeg** (`cad2d` / `sim2d`) | Decide *quando* e *cosa* ridisegnare |
+| **PegLib** | `Invalidate` / `Draw` / upload DRM |
+
+**Nota PEG:** `Invalidate()` da sola **marca** la regione; serve un `Draw()` (poi `EndDraw` → upload) per aggiornare lo schermo.
+
+### Schermi critici (prima delle opt)
+
+| Schermo | Path | Comportamento pan (prima) |
+|---------|------|---------------------------|
+| **Die Set** (CAD) | `CPPGBaseView::OnMove` | `UpdateAllViews()` → view + form/tabelle |
+| **Ottimizza / Sim2D** | `CSim2DView::OnMouseMove` | ogni motion → `Invalidate()` + **`Draw()` immediato** |
+
+---
+
+### Sintesi — cosa abbiamo fatto (punti 1–3)
+
+#### Punto 1 — Sim2D / Ottimizza (`Sim2DView`)
+
+| | |
+|--|--|
+| **Prima** | Ogni motion → `Invalidate()` + `Draw()` subito (anche molti ridisegni tra un vsync e l’altro) |
+| **Dopo** | L’origine (`m_ptTo`) si aggiorna sempre; il `Draw` al massimo ogni **~16 ms** (~60 Hz). Al rilascio dito, un ultimo `Draw` se serve (`DrawPanIfDue`) |
+| **File** | `sim2d/Sim2DView.cpp`, `Sim2DView.h` |
+| **Migliora** | Meno burst di ridisegno → meno code di lavoro e meno interferenza RT |
+| **Non cambia** | Ogni frame resta un ridisegno **completo** del grafico |
+
+#### Punto 2 — Die Set / CAD (`Ppgviews`)
+
+| | |
+|--|--|
+| **Prima** | Pan → `UpdateAllViews()` → canvas **+** form/tabelle/`AdattaMondo`/preview |
+| **Dopo** | In drag solo il **canvas** (`Invalidate`+`Draw` throttled come Sim2D). Form ecc. non si aggiornano mentre trascini |
+| **File** | `cad2d/Ppgviews.cpp`, `Ppgviews.h` |
+| **Migliora** | Soprattutto sul Die Set: meno lavoro inutile fuori dal disegno |
+
+#### Punto 3 — Griglia light (CAD)
+
+| | |
+|--|--|
+| **Prima** | A ogni ridisegno, migliaia di `PutPixel` per i puntini della griglia |
+| **Dopo** | In pan (`m_bTracking`) la griglia **non** si disegna; torna al rilascio |
+| **File** | `MatView.cpp` (Die Set), `Pezzoview.cpp`, `Punzview.cpp` |
+| **Migliora** | Meno CPU per frame sul CAD durante lo scroll |
+
+**In una frase:** abbiamo smesso di ridisegnare a raffica e di aggiornare UI/griglia inutili in pan; il grafico si muove ancora ridisegnando tutto, ma **meno spesso e con meno lavoro intorno**.
+
+---
+
+### Cosa è migliorato (misure 2026-07-24)
+
+| | Prima (indicativo) | Dopo punti 1–3 |
+|--|-------------------|----------------|
+| RT worst in drag | ~100 µs (solo p.1) / storici full-res spesso 120+ | **~92 µs** / 10 min |
+| `reqMBps` (upload) | ~46–47 (solo p.1) | **~23–26** (≈ **−45%**) |
+| `maxRectPx` | ~485k | ancora ~485k |
+
+| Esito | |
+|-------|--|
+| ✅ Sì | Ritardo RT sotto soglia 100 µs; banda media upload circa dimezzata vs solo throttle |
+| ❌ No | Il rettangolo dirty per frame resta grande (`maxRectPx` ≈ viewport) — non è uno “scroll shift” |
+
+**Sample perf — interazione peggiore** (`[WORST rtc_handler_us]`, CPU3, dopo punti 1–3):
+
+```text
+[WORST rtc_handler_us]
+Iterazione:           10000
+rtc_handler_us:       92
+l2d_cache:            19265
+l2d_cache_refill:     3602
+L2 cache miss:        18.6971 %
+bus_access:           14416
+bus_cycles:           438202
+bus_access/bus_cycles: 0.032898
+bus_cycles/bus_access: 30.3969
+cpu_cycles:           871939
+istruzioni:           234517
+IPC:                  0.268960
+CPI:                  3.718020
+```
+
+| Lettura breve | |
+|---------------|--|
+| **92 µs** | Worst-case sotto soglia 100 µs |
+| **L2 miss ~18.7%** | Ancora pressione memoria (coerente con drag GUI) |
+| **IPC ~0.27 / CPI ~3.72** | Stall da memoria/bus |
+
+Esempi log `[RT] uploadDirtyRegion` dopo punti 1–3:
+
+```text
+[RT] uploadDirtyRegion: calls=66 req=25.31MB reqMBps=25.05 updateMs=64.689 effMBps=391.3 maxRectPx=485051
+[RT] uploadDirtyRegion: calls=47 req=15.69MB reqMBps=15.54 updateMs=40.373 effMBps=388.6 maxRectPx=469224
+[RT] uploadDirtyRegion: calls=64 req=23.54MB reqMBps=23.41 updateMs=59.335 effMBps=396.8 maxRectPx=485051
+```
+
+**Deploy:** `libsim2d.so` + `libcad2d.so` → `/opt/Squeeze/`.
+
+---
+
+### Tabella piano (stato)
+
+| # | Intervento | Dove | Stato |
+|---|------------|------|-------|
+| **1** | Cap frequenza `Draw` in pan (~60 Hz) | `sim2d/Sim2DView.*` | ✅ attivo |
+| **2** | In drag CAD: solo canvas, non `UpdateAllViews` | `cad2d/Ppgviews.*` | ✅ attivo |
+| **3** | Griglia light in pan | `MatView` / `Pezzoview` / `Punzview` | ✅ attivo |
+| **4** | Scroll shift (`RectMove` + strisce) | Sim2D + CAD | ❌ **ritirato** |
+
+### Punto 4 — provato e ritirato (2026-07-24)
+
+**Implementazione:** `RectMove` + ridisegno strisce + `Invalidate` client.
+
+| Metrica | Dopo p.1–3 | Con p.4 | Nota |
+|---------|------------|---------|------|
+| RT worst | ~92 µs | ~**88 µs** | RT ok / leggermente meglio |
+| L2 miss (worst) | ~18.7% | ~**30.6%** | Peggio |
+| `bus_access` (worst) | ~14k | ~**38k** | Peggio |
+| **Fluidità pan** | accettabile | **peggiore** (utente) | Motivo del ritiro |
+
+**Perché non ha funzionato:** `RectMove` PEG = Capture+Bitmap (costo aggiunto); le strisce richiamano comunque `Paint`/`DrawDisView`; invalidate client → upload ancora grande. Totale: più lavoro e scatti percepiti.
+
+**Stato codice:** punto 4 **rimosso**; restano solo 1–3.
+
+### Prossimi passi (se serve ancora)
+
+Leve più sane della ripetizione dello shift naïf: risoluzione viewport, meno lavoro in `Paint`/`DrawDisView`, rivedere `syncBackFromPeg` full in Test 6.
+
+---
+
+<a id="campagna-4x30min-2026-07-27"></a>
+
+### Campagna validazione RT — **4 × ~30 min** (2026-07-27)
+
+> **Contesto:** Test **6** DRM + pan/scroll punti **1–3** attivi (punto 4 ritirato). Quattro run endurance da **~mezz’ora** ciascuno per chiudere la validazione RT post-opt.
+>
+> **Obiettivo:** `nanosleep` / `rtc_handler_us` max **≤ 100 µs** (spike **> 100 µs** rari o assenti); DDR stabile; **0 crash**.
+
+| # | Durata | Scenario / config | `nanosleep` max | Spike **> 100 µs** | Attivazioni | DDR `lpddr4` | Worst `rtc_handler_us` | Esito |
+|---|--------|-------------------|----------------:|-------------------:|------------:|-------------:|-----------------------:|-------|
+| **1** | ~30 min | _da annotare_ (no cgroup / baseline) | **100 µs** | **0** | **631 000** | **~3,3–3,4%** | **100 µs** @ iter **9 268** | ✅ |
+| **2** | ~12 min* | cgroup PegExec **`25000 100000`** (25% @ period 100 ms) | **111 µs** | **1** | **244 000** | **~3,3–3,6%** | **111 µs** @ iter **11 418** | ⚠️ |
+| **3** | ~30 min | — | — | — | — | — | — | ⏳ |
+| **4** | ~30 min | — | — | — | — | — | — | ⏳ |
+
+\*Attivazioni ~244k ≈ **~12 min** alla stessa densità del test 1 (~21k att./min); non un full 30 min.
+
+#### Test 1 / 4 — ~30 min (2026-07-27)
+
+**Metriche RT** (Lnk / PerfMonitor, CPU3 — `COM RTC Handler` / `nanosleep`):
+
+| Metrica | Valore |
+|---------|--------|
+| Attivazioni (finestra report) | **631 000** |
+| `nanosleep` min | **11 µs** |
+| `nanosleep` max | **100 µs** |
+| Valori **> 100 µs** | **0** |
+| Obiettivo | ≤ 100 µs — **raggiunto** (max esattamente a soglia, zero spill) |
+
+**Distribuzione valori elevati** (sotto soglia 100 µs):
+
+| Intervallo (µs) | Occorrenze |
+|-----------------|----------:|
+| 60–70 | 659 |
+| 71–80 | 29 |
+| 81–90 | 20 |
+| 91–99 | 4 |
+
+```text
+valore massimo della nanosleep delle ultime 631000 attivazioni vale = 100
+valore minimo della nanosleep delle ultime 631000 attivazioni vale = 11
+i valori sopra ai 100 us nelle ultime 631000 attivazioni sono = 0
+intervallo 60-70: 659
+intervallo 71-80: 29
+intervallo 81-90: 20
+intervallo 91-99: 4
+```
+
+**Banda DDR** (`perf` / `imx8mp_bandwidth_usage.lpddr4`, campioni ~1 s):
+
+| Metrica | Valore tipico |
+|---------|---------------|
+| Utilizzo LPDDR4 | **~3,3–3,4%** (stabile sul run) |
+
+Esempio (finestre consecutive):
+
+```text
+imx8_ddr0/axid-write + axid-read → imx8mp_bandwidth_usage.lpddr4 ≈ 3.3–3.4 %
+duration_time ≈ 1.001–1.002 s
+```
+
+**Peggior iterazione `[WORST rtc_handler_us]`** (CPU3, iter **9 268**):
+
+| Contatore | Valore |
+|-----------|--------|
+| `rtc_handler_us` | **100 µs** |
+| L2 miss | **17,34%** (`l2d_cache_refill` / `l2d_cache`) |
+| `bus_access` | 13 107 |
+| `bus_cycles` | 419 741 |
+| `bus_access` / `bus_cycles` | 0,0312 |
+| `bus_cycles` / `bus_access` | 32,02 |
+| `cpu_cycles` | 835 192 |
+| Istruzioni | 234 114 |
+| IPC | **0,280** |
+| CPI | **3,567** |
+
+```text
+Core: CPU3
+[WORST rtc_handler_us]
+Iterazione:           9268
+rtc_handler_us:       100
+l2d_cache:            18880
+l2d_cache_refill:     3274
+L2 cache miss:        17.3411 %
+bus_access:           13107
+bus_cycles:           419741
+bus_access/bus_cycles: 0.031226
+bus_cycles/bus_access: 32.0242
+cpu_cycles:           835192
+istruzioni:           234114
+IPC:                  0.280312
+CPI:                  3.567459
+```
+
+**Lettura breve test 1:**
+
+| Asse | Esito |
+|------|-------|
+| **RT** | ✅ max **100 µs**, **0** spill > 100 su **631k** att. |
+| **DDR** | ✅ ~**3,3–3,4%** LPDDR4, senza burst anomali nel campione |
+| **Worst PMU** | L2 miss **~17%**, IPC **~0,28** — coerente con carico GUI moderato (simile al sample post p.1–3 ~18–19%) |
+
+#### Test 2 / 4 — cgroup `25000 100000` (2026-07-27)
+
+**Config PegExec:**
+
+```text
+cpu.max = 25000 100000    # 25 ms CPU / 100 ms  →  ~25% medi, burst fino a ~25 ms
+cpuset.cpus = 0-2
+```
+
+`status` a metà run (es.): `nr_periods≈1029`, `nr_throttled≈10` (~1% periodi), `throttled_usec≈666 ms` — throttle **raro** ma a **pacchi lunghi**.
+
+**Metriche RT** (CPU3):
+
+| Metrica | Valore | vs test 1 |
+|---------|--------|-----------|
+| Attivazioni | **244 000** (~12 min) | più corto |
+| `nanosleep` min | **11 µs** | = |
+| `nanosleep` max | **111 µs** | **+11 µs** |
+| Valori **> 100 µs** | **1** (≈ **0,0004%**) | 0 → 1 |
+
+**Distribuzione valori elevati** (< 100 µs):
+
+| Intervallo (µs) | Occorrenze |
+|-----------------|----------:|
+| 60–70 | 592 |
+| 71–80 | 37 |
+| 81–90 | 6 |
+| 91–99 | 6 |
+
+```text
+valore massimo della nanosleep delle ultime 244000 attivazioni vale = 111
+valore minimo della nanosleep delle ultime 244000 attivazioni vale = 11
+i valori sopra ai 100 us nelle ultime244000 attivazioni sono = 1
+intervallo 60-70: 592
+intervallo 71-80: 37
+intervallo 81-90: 6
+intervallo 91-99: 6
+```
+
+**Banda DDR** (`imx8mp_bandwidth_usage.lpddr4`):
+
+| Metrica | Valore tipico |
+|---------|---------------|
+| Utilizzo LPDDR4 | **~3,3–3,6%** (stabile; picco campione **3,6%**) |
+
+```text
+axid-write ≈ 176–192 M   axid-read ≈ 355–376 M   → lpddr4 ≈ 3.3–3.6 %
+```
+
+**Peggior iterazione `[WORST rtc_handler_us]`** (CPU3, iter **11 418**):
+
+| Contatore | Valore | vs test 1 (100 µs @ 9268) |
+|-----------|--------|---------------------------|
+| `rtc_handler_us` | **111 µs** | **+11 µs** |
+| L2 miss | **27,90%** | **+10,6 pp** (17,34% → 27,90%) |
+| `bus_access` | 21 125 | **+61%** |
+| `bus_cycles` | 533 861 | +27% |
+| `cpu_cycles` | 1 063 410 | +27% |
+| Istruzioni | 230 359 | ≈ uguale |
+| IPC | **0,217** | peggio (0,280) |
+| CPI | **4,616** | peggio (3,567) |
+
+```text
+Core: CPU3
+[WORST rtc_handler_us]
+Iterazione:           11418
+rtc_handler_us:       111
+l2d_cache:            18922
+l2d_cache_refill:     5279
+L2 cache miss:        27.8987 %
+bus_access:           21125
+bus_cycles:           533861
+bus_access/bus_cycles: 0.039570
+bus_cycles/bus_access: 25.2715
+cpu_cycles:           1063410
+istruzioni:           230359
+IPC:                  0.216623
+CPI:                  4.616316
+```
+
+**Lettura breve test 2:**
+
+| Asse | Esito |
+|------|-------|
+| **RT** | ⚠️ max **111 µs**, **1** spill — **peggio del test 1** (100 / 0) |
+| **DDR %** | ≈ invariata (~3,3–3,6%) — lo scanout domina; il cgroup non “salva” la metrica % |
+| **Worst PMU** | L2 miss **~28%**, IPC **~0,22**, `bus_access` **+61%** → stall memoria durante il picco |
+
+> **Conclusione su `25000 100000`:** stessa % media del 25% “buono” (`5000 20000` → 91 µs in campagna luglio), ma **period 100 ms** consente burst ~25 ms → peggiora il **worst-case RT** vs baseline senza cgroup. **Non usare in produzione.** Preferire `stop`, oppure `10000 20000` / `5000 20000`.
+
+> Prossimi: test **3/4**, **4/4** (meglio **senza** questo `cpu.max`, o con period **20 000**).
 
 ---
 
