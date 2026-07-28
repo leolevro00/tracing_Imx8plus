@@ -1,7 +1,8 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> Ultimo aggiornamento: **2026-07-27** (campagna 4× su `test-6-font-pan-scroll-opt`; confronto UI `test-6-with-new-font` + cgroup `2000 20000` → max **83 µs**, 0 spill)
+> Ultimo aggiornamento: **2026-07-28** (branch `experiment/test-6-deferred-ch0-feedback`, pressbrakepeg: defer 500 ms Editor/Manual → max **88 µs**, 0 spike su 137k att.; vedi [→ sezione P](#editor-manual-defer-2026-07-28))
+> Aggiornamento precedente: **2026-07-27** (campagna 4× su `test-6-font-pan-scroll-opt`; confronto UI `test-6-with-new-font` + cgroup `2000 20000` → max **83 µs**, 0 spill)
 ---
 
 ## Documentazione di supporto (approfondimenti)
@@ -22,6 +23,7 @@
 | [Ottimizzazioni pan/scroll grafici](#ottimizzazioni-pan-scroll) | **In questo file** — alleggerire drag Die Set / Sim2D / Ottimizza (pressbrakepeg + ruolo PegLib) |
 | [Campagna 4×30 min (2026-07-27)](#campagna-4x30min-2026-07-27) | **In questo file** — validazione RT su branch **`experiment/test-6-font-pan-scroll-opt`** |
 | [Confronto branch font / UI](#confronto-branch-test6-font-2026-07-27) | **In questo file** — `pan-scroll-opt` vs **`experiment/test-6-with-new-font`** (stesso cgroup 10%) |
+| [Editor/Manual: feedback + defer 500 ms](#editor-manual-defer-2026-07-28) | **In questo file** — branch **`experiment/test-6-deferred-ch0-feedback`** (pressbrakepeg): jitter da martellamento Editor↔Manual |
 
 ---
 
@@ -4256,6 +4258,79 @@ controllata la memoria font → **flash Chs 17.82 → 11.54 MB (−6.28 MB)**; *
 
 **Stato:** fatto su branch experiment; redeploy `libPegFontChs*.so` + smoke UI CHS (Yahei da `.gz`) e EU.  
 **Rollback:** `git switch` al branch precedente in kvuib → ricompilare Chs → redeploy `.so` vecchie.
+
+---
+
+<a id="editor-manual-defer-2026-07-28"></a>
+
+## P — Editor/Manual: feedback immediato + lavoro pesante differito 500 ms (2026-07-28)
+
+**Stato:** ⏳ **Promettente, da confermare** · **Repo/Branch:** `pressbrakepeg` → `experiment/test-6-deferred-ch0-feedback` · [← Tabella](#stato-test)
+
+---
+
+**Problema:** premendo molto velocemente e ripetutamente i tasti **Editor ↔ Manual** (cambio "stato macchina" IMP/MAN in `CPpgView`), il thread RT (`COM RTC Handler`) mostrava picchi di `nanosleep` fino a **145 µs**, ben oltre il rumore di fondo normale. Causa: `AttivaPaginaCH0()` esegue in modo **sincrono e bloccante**, ad ogni pressione, `SettaControlli()` → `SettaAssi()` (centinaia di `Add()`/`Remove()` su `PegThing` per mostrare/nascondere gli assi), `GetEntry()` → `UpdateData()` (rilettura/ridisegno di ~150 edit) e `AttivaMenu()` (toolbar/softkey). Altri cambi pagina "pesanti" (es. Program list ↔ Die list) non mostravano lo stesso pattern di picchi.
+
+**Idea (prof. Paolo Valente):** separare il feedback visivo immediato del bottone dal lavoro vero, differendo quest'ultimo di un tempo fisso (500 ms) dall'ultima pressione: l'utente vede subito il bottone attivarsi, ma `SettaControlli`/`GetEntry` partono solo quando sono trascorsi davvero 500 ms senza altre pressioni. Martellando i tasti, resta in coda solo l'ultima richiesta.
+
+**Modifica:** `AttivaPaginaCH0(nStato)` (`CMDINum`) diviso in due fasi:
+- **Immediato, sempre:** `ApplyCH0ToolbarFeedback()` (evidenziazione tasto) + stato macchina (`ScriviStatoMacchina`, `QuotaPosOK`, flag `theApp.m_bFirstTimeInStop/Start`) — letto in modo sincrono da `GestionePagine::KeyCambiaPagina`/`OnImpostazioni`/`OnMan` per decidere la navigazione; se restasse "vecchio" per 500 ms i tasti sembrerebbero non rispondere.
+- **Differito 500 ms, solo per IMP/MAN:** `CompletaAttivaPaginaCH0()` (`SettaControlli`, `GetEntry`, `SettaFocusOnNome`, `AttivaMenu`), tramite timer periodico `TIMER_CH0_DEFER` (poll ogni 100 ms; ad ogni tick ricalcola se sono trascorsi ≥ 500 ms dall'ultima pressione). Gli altri stati (AUTO/SAUTO/…) restano sincroni come prima.
+
+File toccati: `editorprogrammi/MDINum.{h,cpp}`, `editorprogrammi/PpgViewBase.{h,cpp}`, `editorprogrammi/PpgView.cpp`, `IncPPG/CommonConst.h`.
+
+**Come cambiare il ritardo (300/500/… ms):** valore unico, costante `CH0_DEFER_DELAY_MS` in cima a `editorprogrammi/MDINum.cpp` (subito dopo gli `#include`):
+
+```cpp
+static const DWORD CH0_DEFER_DELAY_MS = 300; // prima: 500
+```
+
+Usata dentro `CMDINum::HandleCH0DeferTimer()` nel confronto `if(elapsed < CH0_DEFER_DELAY_MS) return TRUE;` — è l'unico punto del codice con il valore effettivo, non serve toccare altro. Il timer di polling (`TIMER_CH0_DEFER`, `PpgViewBase.cpp`, `ScheduleCH0HeavyWork`) resta a **100 ms** di granularità (`ONE_SECOND/10`): con soglie ≥ 200 ms va bene così com'è; se si scendesse molto sotto i 100 ms andrebbe ridotto anche il periodo del poll. Dopo la modifica basta ricompilare `libeditorprogrammi.so` e rideployare.
+
+**2026-07-28 (pomeriggio):** ritardo ridotto **500 → 300 ms** per lo stesso test, in attesa di ripetere la campagna di martellamento Editor/Manual e confrontare il nuovo massimo `nanosleep` con gli **88 µs** misurati a 500 ms. *(Risultato da aggiungere qui appena disponibile.)*
+
+**Bug trovati e risolti durante l'implementazione (stesso branch):**
+- **Crash SIGSEGV in `PegGroup::Add`:** `KillTimer()` non svuota i `PM_TIMER` già in coda in PegLib; il primo tentativo uccideva il timer troppo presto causando esecuzioni multiple/rientranti con puntatori incoerenti. Fix: il timer resta periodico e si ferma **da solo**, solo dopo aver verificato i 500 ms ed eseguito il lavoro.
+- **Navigazione rotta ("indietro" che non rispondeva) + testo strano:** causato da `ScriviStatoMacchina()` inizialmente lasciato nella parte differita, creando una finestra di 500 ms in cui `LeggiStatoMacchina()` restava vecchio. Fix: stato macchina spostato nella parte immediata; solo il lavoro grafico pesante resta differito.
+- **Campi sovrapposti premendo Editor→Editor ripetutamente:** comportamento preesistente (non introdotto qui) — ripremere Editor mentre si è già in Editor fa un vero cambio pagina Impostazioni ↔ Impostazioni-Zoom (`CambiaPagina`, `Remove()`/`Add()` reali tra due oggetti `CPpgView`/`CPpgViewZoom`). Il gestore `PM_HIDE` uccideva altri timer della pagina ma non il nuovo `TIMER_CH0_DEFER`: se restava armato mentre la pagina veniva nascosta, scattava più tardi rifacendo `SettaControlli`/`GetEntry` sopra al setup già fatto da `OnChiave0` in `PM_SHOW`, duplicando i controlli a video. Fix: `PM_HIDE` ora chiama `CancelCH0HeavyWorkSchedule()` e resetta lo stato completato.
+
+**Scenario:** martellamento rapido Editor ↔ Manual, ~137 000 attivazioni consecutive.
+
+| Attivazioni cumulative | `nanosleep` min | `nanosleep` max | Spike **> 100 µs** |
+|---|---|---|---|
+| 137 000 | **12 µs** | **88 µs** | **0** |
+| ultime 7 000 | — | **61 µs** | — |
+
+**Distribuzione (137 000 att.):**
+
+| Intervallo (µs) | Conteggio |
+|---|---|
+| 60–70 | 104 |
+| 71–80 | 17 |
+| 81–90 | 2 |
+| 91–99 | 0 |
+
+**Log esempio:**
+```text
+****************************************************
+valore massimo della nanosleep delle  137000 attivazioni vale = 88
+valore minimo della nanosleep delle ultime 137000 attivazioni vale = 12
+i valori sopra ai 100 us nelle ultime137000 attivazioni sono = 0
+****************************************************
+
+I valori nell'intervallo 60 70 sono = 104
+I valori nell'intervallo 71 80 sono = 17
+I valori nell'intervallo 81 90 sono = 2
+I valori nell'intervallo 91 99 sono = 0
+valore massimo della nanosleep delle ultime 7000 attivazioni vale = 61
+****************************************************
+```
+
+**Confronto:** senza defer, lo stesso martellamento Editor/Manual arrivava a picchi ripetuti **102–145 µs**. Con il defer attivo: massimo sceso a **88 µs**, **zero** valori sopra i 100 µs su tutte le 137 000 attivazioni.
+
+**Conclusione:** ⏳ **Promettente** — il pattern di picchi anomali (> 100 µs) tipico del martellamento Editor/Manual sembra eliminato dal defer del lavoro pesante. Da confermare con sessioni più lunghe e pattern di pressione diversi prima di considerarla soluzione definitiva.
+**Stato codice:** attivo su branch experiment (`experiment/test-6-deferred-ch0-feedback`), non ancora mergiato in `test-6-with-new-font` / produzione.
+**Prossimi passi:** ripetere il test più a lungo; valutare lo stesso pattern di defer per altre transizioni di stato macchina (Auto/Semiauto/Corrections); tenere in sospeso l'ipotesi alternativa IPI da `PerfMonitor` (`PerfMonitor_Init` resta disattivato in `PlcEsa/Lnk/main.cpp` per isolare l'effetto del solo defer).
 
 ---
 
