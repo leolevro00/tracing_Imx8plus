@@ -4334,6 +4334,126 @@ valore massimo della nanosleep delle ultime 7000 attivazioni vale = 61
 
 ---
 
+<a id="guida-ai-defer-editor-manual"></a>
+
+## Q — Guida prompt AI per risolvere il problema del ritardo Editor/Manual
+
+> Questa sezione serve a **riaprire il problema in futuro** con una AI, partendo da zero, senza ripetere gli errori e i bug che abbiamo incontrato la prima volta. Copia il blocco "Prompt da incollare" in una nuova chat e la AI avrà tutto il contesto necessario.
+
+---
+
+### Contesto da sapere prima di aprire la chat
+
+| Cosa | Dettaglio |
+|------|-----------|
+| Repo codice | `pressbrakepeg` (repo separato, non `pegenstein`) |
+| Branch di riferimento | `experiment/test-6-deferred-ch0-feedback` (contiene già la soluzione funzionante) |
+| File chiave | `editorprogrammi/MDINum.{h,cpp}`, `editorprogrammi/PpgViewBase.{h,cpp}`, `editorprogrammi/PpgView.cpp`, `IncPPG/CommonConst.h` |
+| Metrica RT misurata | `nanosleep` max del thread `COM RTC Handler` (CPU3), log `PegExec` su target i.MX8M Plus |
+| Obiettivo | Nessun valore `nanosleep` > 100 µs durante martellamento rapido Editor ↔ Manual |
+| Soluzione adottata | Defer di 500 ms (ora 300 ms) del lavoro pesante (`SettaControlli`/`GetEntry`/`AttivaMenu`) dal momento dell'ultima pressione, con feedback toolbar e stato macchina **sempre immediati** |
+| Costante da modificare per cambiare il delay | `CH0_DEFER_DELAY_MS` in cima a `editorprogrammi/MDINum.cpp` |
+
+---
+
+### Prompt da incollare in una nuova chat AI
+
+```
+Contesto: sto lavorando su un HMI industriale (pressa piegatrice) basato su PegLib
+su i.MX8M Plus, Linux PREEMPT_RT. Il codice applicativo è nel repo "pressbrakepeg".
+
+PROBLEMA:
+Premere rapidamente e ripetutamente i tasti Editor ↔ Manual causa picchi di jitter
+nel thread RT "COM RTC Handler" (nanosleep max fino a 145 µs, obiettivo < 100 µs).
+Il percorso critico è CMDINum::AttivaPaginaCH0(int nStato), chiamato da
+CPpgView::OnImpostazioni() (tasto Editor, stato IMP) e OnMan() (tasto Manual, stato MAN).
+Ogni chiamata esegue in modo sincrono e bloccante: SettaControlli() → SettaAssi()
+(centinaia di Add/Remove su PegThing), GetEntry() → UpdateData() (~150 edit),
+AttivaMenu() (toolbar/softkey). Questi sono il "lavoro pesante".
+
+SOLUZIONE DA IMPLEMENTARE:
+Dividere AttivaPaginaCH0 in due fasi:
+1. IMMEDIATA (eseguita subito a ogni pressione):
+   - feedback toolbar: ApplyCH0ToolbarFeedback(nStato) → solo KvaraMenu()
+   - aggiornamento stato macchina: ScriviStatoMacchina(nStato), QuotaPosOK(0., RES),
+     theApp.m_bFirstTimeInStop = TRUE, theApp.m_bFirstTimeInStart = FALSE
+   ATTENZIONE: ScriviStatoMacchina DEVE essere immediato. GestionePagine::KeyCambiaPagina,
+   OnImpostazioni, OnMan leggono LeggiStatoMacchina() in modo sincrono subito dopo la
+   pressione per decidere la navigazione. Se resta "vecchio" per qualche centinaia di ms,
+   i tasti sembrano non rispondere o la navigazione si confonde.
+
+2. DIFFERITA di CH0_DEFER_DELAY_MS ms dall'ultima pressione (solo per stati IMP e MAN):
+   CompletaAttivaPaginaCH0(nStato): SettaControlli(), GetEntry(), SettaFocusOnNome(),
+   AttivaMenu(nStato). Meccanismo: timer periodico TIMER_CH0_DEFER (poll ogni 100 ms);
+   a ogni tick controlla se GetTickCount() - m_dwTimeLast >= CH0_DEFER_DELAY_MS; se sì,
+   esegue il lavoro e si ferma. Per AUTO/SAUTO/CORR/POSI: nessun defer, lavoro immediato.
+
+TRAPPOLE DA EVITARE (errori già incontrati in precedenza):
+
+1. KillTimer NON svuota i PM_TIMER già in coda in PegLib.
+   Se uccidi TIMER_CH0_DEFER nel gestore PM_TIMER dopo il primo tick, ci sono già altri
+   PM_TIMER in coda che continuano ad arrivare. Il risultato è CompletaAttivaPaginaCH0
+   chiamata più volte in rapida successione → PegGroup::Add con puntatori incoerenti →
+   SIGSEGV. Soluzione: il timer deve essere periodico e fermarsi DA SOLO, solo dopo aver
+   verificato l'elapsed e completato il lavoro (dentro HandleCH0DeferTimer, chiamare
+   CancelCH0HeavyWorkSchedule() solo quando si decide di eseguire davvero il lavoro).
+   Non killare il timer in PM_TIMER a ogni tick.
+
+2. Il timer di defer NON deve sopravvivere all'hide della pagina.
+   In PegLib, premere Editor mentre si è già in Editor provoca un vero CambiaPagina
+   tra la pagina Impostazioni (CPpgView) e la pagina Impostazioni-Zoom (CPpgViewZoom):
+   sono due oggetti C++ distinti. La pagina nascosta riceve PM_HIDE. Se TIMER_CH0_DEFER
+   è ancora armato sulla pagina nascosta, scatterà più tardi e rifarà SettaControlli/
+   GetEntry sopra al setup già fatto da OnChiave0 in PM_SHOW → Add() duplicati →
+   controlli sovrapposti, testo "sporco" a video. Soluzione: nel gestore PM_HIDE di
+   CPpgView::Message aggiungere CancelCH0HeavyWorkSchedule() e
+   m_nLastCompletedCH0State = -1 prima di chiamare CPpgViewBase::Message(Mesg).
+
+3. La guardia m_bCH0Completing protegge solo dalla rientranza nello stesso stack.
+   Non protegge da due timer fires separati nel tempo. Per questo il timer deve essere
+   periodico con autodistruzione, non un one-shot.
+
+4. Prima configurazione del layout: non differire la prima volta.
+   Se m_nLastCompletedCH0State < 0 (pagina non ancora configurata), eseguire
+   CompletaAttivaPaginaCH0 subito senza defer: il layout non è ancora pronto e il defer
+   causerebbe Add() su controlli non inizializzati.
+
+5. Non skippare se nStato == m_nLastCompletedCH0State solo dentro HandleCH0DeferTimer.
+   Va bene skippare lì (risparmio inutile), ma AttivaPaginaCH0 deve comunque aggiornare
+   m_dwTimeLast e armare il timer per ogni pressione, perché l'utente potrebbe aver
+   cambiato dati nel frattempo.
+
+FILE DA LEGGERE PRIMA DI SCRIVERE CODICE:
+- editorprogrammi/MDINum.h e MDINum.cpp (classe CMDINum, AttivaPaginaCH0)
+- editorprogrammi/PpgViewBase.h e PpgViewBase.cpp (override ScheduleCH0HeavyWork/
+  CancelCH0HeavyWorkSchedule con SetTimer/KillTimer, gestore PM_TIMER)
+- editorprogrammi/PpgView.cpp (gestore PM_HIDE e PM_SHOW, OnChiave0, OnImpostazioni,
+  OnMan)
+- IncPPG/CommonConst.h (definizione TIMER_CH0_DEFER)
+
+VALIDAZIONE PRIMA DI DICHIARARE "FUNZIONA":
+1. Premi Editor → Manual → Editor normalmente, verifica che la UI cambi correttamente.
+2. Premi Editor più volte di fila (già in Editor): verifica che non compaiano campi
+   sovrapposti o testo "sporco" (questo è il bug del PM_HIDE/CambiaPagina).
+3. Premi Manual più volte di fila (già in Manual): stesso controllo.
+4. Martella velocemente Editor ↔ Manual ~10 volte: verifica che dopo la pausa la UI
+   mostri lo stato corretto (non uno stato intermedio).
+5. Vai in Auto o Semiauto: verifica che quei passaggi siano ancora immediati e corretti.
+6. Solo dopo questi check, misurare nanosleep con Lnk attivo.
+```
+
+---
+
+### Riepilogo bug incontrati la prima volta (con fix)
+
+| # | Bug | Causa | Fix |
+|---|-----|-------|-----|
+| 1 | SIGSEGV in `PegGroup::Add` | `KillTimer` non svuota la coda PM_TIMER → `CompletaAttivaPaginaCH0` chiamata più volte con stato inconsistente | Timer periodico che si ferma da solo solo a lavoro completato |
+| 2 | Navigazione rotta, "tasto indietro non risponde" | `ScriviStatoMacchina` messo nella parte differita → `LeggiStatoMacchina()` letto "vecchio" per ~500 ms da `GestionePagine` | Spostare stato macchina nella parte **immediata** |
+| 3 | Testo/campi sovrapposti premendo Editor→Editor | `TIMER_CH0_DEFER` sopravviveva a `PM_HIDE` → rifaceva `SettaControlli` sopra setup fresco di `OnChiave0` in `PM_SHOW` | `CancelCH0HeavyWorkSchedule()` + reset `m_nLastCompletedCH0State` in `PM_HIDE` |
+
+---
+
 ## Template nuova voce
 
 Copiare e compilare per ogni nuovo test:
