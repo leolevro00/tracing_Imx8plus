@@ -1,7 +1,9 @@
 # Registro test RT — GUI PEG/SDL su i.MX8M Plus
 
 > **File vivo**: aggiornato a ogni esperimento sul target o modifica rilevante nel codice.
-> 🏁 **[IPOTESI FINALE](#ipotesi-finale) (2026-07-30)** — il jitter residuo nasce nel **percorso kernel di risveglio**, il cui costo è **bimodale**: o l'iterazione è pulita (~670-700 k cicli, ~18 µs) o porta con sé ~100 000 cicli di lavoro kernel periodico in più (tick, accounting cgroup, PELT, bilanciamento pre-idle) e finisce fra 25 e 60 µs. **La GUI non rallenta quel percorso: aumenta la probabilità che la collisione avvenga.** Nove ipotesi alternative chiuse ciascuna con una misura (banda DDR, cache miss, contesa di latenza, processi concorrenti, idle profondo, ciclo idle/wakeup via PM QoS, DVFS, termico, load balancing). Piste aperte: `nohz_full=3` (guadagno limitato, richiede un solo task runnable) e il **secondo thread RT sul core isolato**.
+> 🏆 **[TEST FINALE DI TIROCINIO](#test-finale-tirocinio) (2026-07-31) — OBIETTIVO RAGGIUNTO.** Con tutte le ottimizzazioni attive (DRM diretto, pan 33 ms, defer CH0, `ListeDiag` compilata fuori, realloc PegGL rimossa, throttling cgroup al 15 % su CPU0-2): **1 451 000 attivazioni in ~1 h 37 min, ritardo massimo 98 µs, ZERO attivazioni sopra i 100 µs.** Il 99,895 % sta sotto i 60 µs. Progressione sul caso peggiore lungo la campagna: **158 → 113 → 103 → 98 µs (−38 %)**.
+>
+> 🏁 **[IPOTESI FINALE](#ipotesi-finale) — rettificata il 2026-07-31.** Il jitter residuo è **interferenza di memoria sulla L2 condivisa** del cluster Cortex-A53. `isolcpus=3` isola lo **scheduler**, non la **cache**: i 4 core condividono la L2. Ogni blit a schermo intero muove **2,4 MB attraverso una cache da 512 KB** (schermo 1024×600 RGB565 = **1,2 MB per buffer**, misurato dalle mappature DRM), azzerandola. Il thread RT esegue **le stesse identiche istruzioni** (567 692 contro 567 603, **−0,016 %**) ma con **+685 miss L2** spende **+145 505 cicli** e **+30 µs**: **110-212 cicli per miss**, cioè la latenza DRAM, riprodotta su tre dataset. **La banda non c'entra** (~72 MB/s, briciole): conta quante volte al secondo la cache viene spazzata. Il conto **30 spazzate/s ÷ 250 risvegli/s = 12 %** predice il **+8 % di iterazioni lente** misurato sotto carico. ⚠️ *La prima stesura escludeva l'interferenza di memoria: era sbagliata, vedi la rettifica in testa alla sezione.*
 > 🎯 **Meccanismo del jitter — indagine PMU (2026-07-30)**. Confronto tra **due distribuzioni complete da 10 000 iterazioni** (riposo vs martellamento del simulatore di piegatura), contatori PMU per singola iterazione RT.
 > **La GUI non cambia la natura di un'iterazione lenta, cambia quanto spesso capita**: iterazioni > 25 µs **+62 %**, > 55 µs **+132 %**, ma **a parità di ritardo i contatori sono identici** (CPI, refill L2, cicli) in entrambe le condizioni.
 > E il ritardo **non è tempo di esecuzione**: nella fascia ≥ 55 µs i cicli CPU sono gli stessi della fascia < 25 µs (~670–780 k) a fronte di un ritardo triplo ⇒ **~40 µs in cui il core non esegue nulla**. Su ARM il contatore si ferma col clock gated ⇒ sospetto principale: **latenza di uscita da `cpuidle`**, non contesa di memoria. Test decisivo (5 min, non ancora fatto): disabilitare gli idle state profondi su CPU3.
@@ -37,7 +39,8 @@
 | [Editor/Manual: feedback + defer 500 ms](#editor-manual-defer-2026-07-28) | **In questo file** — branch **`experiment/test-6-deferred-ch0-feedback`** (pressbrakepeg): jitter da martellamento Editor↔Manual |
 | [Estensione defer CH0 a Correzioni/Auto/Semiauto](#ch0-defer-estensione-corr-auto-sauto-2026-07-29) | **In questo file** — analisi rischio Start/Stop/Plus/Minus, piano defer completo (CORR) vs parziale (AUTO/SAUTO), scope esclusi (liste, Posiziona); **bug trovato**: `PM_HIDE` azzera il defer ad ogni pressione |
 | [Test cgroup ~15%, uso comune + scroll Die Set](#test-cgroup15-uso-comune-scroll-dieset-2026-07-29) | **In questo file** — 529k att., max 109µs; nota: pan/scroll non ottimizzato su questo branch |
-| 🏁 [**IPOTESI FINALE**](#ipotesi-finale) | **In questo file** — **sezione conclusiva**: catena di eliminazione (9 ipotesi chiuse ciascuna con una misura), cosa resta accertato, l'ipotesi che sopravvive a tutti i dati, piste aperte e cosa NON riprovare |
+| 🏆 [**TEST FINALE DI TIROCINIO** — obiettivo raggiunto](#test-finale-tirocinio) | **In questo file** — 1 451 000 attivazioni (~1 h 37 min), **massimo 98 µs**, **zero sopra i 100 µs**. Configurazione completa, distribuzione della coda, progressione 158 → 113 → 103 → 98 µs, PMU della peggiore iterazione e analisi del throttling |
+| 🏁 [**IPOTESI FINALE** — interferenza sulla L2 condivisa](#ipotesi-finale) | **In questo file** — **sezione conclusiva (rettificata 31/07)**: la prova a istruzioni costanti, le due trappole metodologiche (`bus_cycles`, CPI), il fatto che `isolcpus` non isola la cache, **l'aritmetica 1024×600 / L2 e il conto 30/250 che predice il +8 % misurato**, l'esperimento `stress_mem` e il piano d'azione riordinato |
 | ⚠️ [**Meccanismo del jitter — indagine PMU (non risolto)**](#meccanismo-jitter-risolto-2026-07-30) | **In questo file** — `PerfMonitor` riattivato (`RTCHndlr.cpp` + `Lnk/main.cpp`, warm-up `PERF_WARMUP_ITER`); ipotesi "contesa di latenza" formulata su 2 worst case e **ritirata** dopo analisi su 10 000 iterazioni; cosa resta accertato e cosa no; include la nota metodologica sul rischio dei campioni piccoli |
 | ⭐ [**SDL vs DRM diretto: confronto architetturale**](#sdl-vs-drm-architettura) | **In questo file** — **sezione di riferimento**: le due pipeline passo per passo con riferimenti al codice, conteggio buffer/copie, i **quattro fattori** che spiegano i risultati (copie, schermo intero vs regione sporca, vsync bloccante vs page flip asincrono, conversione RGB565→ARGB8888 nascosta), terminologia (display controller vs GPU vs dumb buffer), principio **determinismo ≠ throughput**, sequenza Test 5 → 5b → 6, risultati misurati e cosa resta non verificato |
 | [Merge finale: defer CH0 + pan/scroll](#merge-ch0-defer-pan-scroll-2026-07-30) | **In questo file** — branch `experiment/test-6-ch0-defer-plus-pan-scroll`, contenuto e rischi del merge |
@@ -5350,18 +5353,220 @@ La conclusione ritirata era **coerente con tutti i dati disponibili al momento**
 
 ---
 
+<a id="test-finale-tirocinio"></a>
+
+## 🏆 TEST FINALE DI TIROCINIO (2026-07-31) — obiettivo raggiunto
+
+Ultima misura della campagna, con **tutte** le ottimizzazioni attive contemporaneamente.
+
+### Configurazione sotto test
+
+| Componente | Stato |
+|---|---|
+| Uscita video | **DRM diretto** (`EMBEDDED_HMI_RT_DRM_DIRECT`), double buffering, no SDL |
+| Coalescing del pan | **33 ms** (~30 fps) su `sim2d` e `cad2d` |
+| Defer CH0 | attivo, `CH0_DEFER_DELAY_MS = 300`, con batching |
+| Tracce `ListeDiag` | compilate fuori (`LISTE_DIAG_ENABLED` non definita) |
+| PegGL | rimossa la realloc per frame in `peglSwapBuffers` |
+| Throttling GUI | cgroup v2 `cpu.max = 1000 6666` (**15 %**) su `cpuset.cpus = 0-2` |
+| Isolamento | `isolcpus=3`, governor `performance` |
+
+**Durata:** 1 451 000 attivazioni × 4 ms = **5 804 s ≈ 1 h 37 min** di funzionamento continuo sotto interazione.
+
+### 🔖 Tracciabilità — come ricostruire esattamente questo test
+
+I due repository hanno branch con **nomi diversi**: senza questa tabella la coppia non è ricostruibile.
+
+| Repository | Branch | Commit rilevanti |
+|---|---|---|
+| `pressbrakepeg` | `experiment/test-6-ch0-defer-plus-pan-scroll` | `abbffb7` — pan redraw 16 → 33 ms (`sim2d/Sim2DView.cpp`, `cad2d/Ppgviews.cpp`)<br>`c74153c` — `ListeDiag` compilata fuori (`liste/liste_diag.h`)<br>*(defer CH0 in `editorprogrammi/MDINum.cpp` + `PpgView.cpp`: commit precedenti sullo stesso branch)* |
+| `pegenstein` | `experiment/test-6-ch0-defer-corr-auto-sauto-estensione` | **`4e93bb5`** (HEAD) — `perf(peggl): reuse the native bitmap instead of reallocating it`<br>**`f53ccdb`** — `build(peglib): enable direct DRM output and RT statistics`<br>`1b9ea7e` — risolto problema di latenza dato dal doppio tocco sullo schermo *(anche punta del branch `experiment/test6-with-new-font`)*<br>`beaa73e` — risoluzione crash dell'interfaccia, test OK |
+| `SqCom_Library` / `PlcEsa` | ➡️ **TODO** | PerfMonitor riattivato (`SqCom/RTCHndlr.cpp`, `Lnk/main.cpp`)<br>➡️ **TODO: inserire branch e hash** — se `git status` li mostra ancora modificati, committare prima con `feat(sqcom): re-enable PerfMonitor on the RT handler thread` |
+
+**Catena dei commit su `pegenstein`** (dal più vecchio):
+
+```
+f62373d  aggiunta test6
+f018916  modifica peglib
+beaa73e  risoluzione crash dell'interfaccia, Test OK
+1b9ea7e  risolto problema latenza data dal doppio tocco sullo schermo   <- branch test6-with-new-font
+f53ccdb  build(peglib): enable direct DRM output and RT statistics
+4e93bb5  perf(peggl): reuse the native bitmap instead of reallocating it  <- HEAD, codice del test finale
+```
+
+Per tornare esattamente allo stato del test da 98 µs:
+
+```bash
+cd pressbrakepeg && git checkout abbffb7   # oppure il branch experiment/test-6-ch0-defer-plus-pan-scroll
+cd pegenstein    && git checkout 4e93bb5   # oppure experiment/test-6-ch0-defer-corr-auto-sauto-estensione
+```
+
+#### Configurazione a runtime — NON è in git, va riprodotta a mano
+
+Questa parte è quella che si perde più facilmente: nessuna di queste impostazioni vive nel codice.
+
+**1. Riga di comando del kernel** (`/proc/cmdline`):
+
+```
+isolcpus=3
+```
+
+⚠️ **`nohz_full` NON è impostato** — verificato, `/sys/devices/system/cpu/nohz_full` è vuoto. Se qualcuno lo aggiungesse, i numeri di questo test non sono più confrontabili.
+
+**2. Throttling della GUI** — cgroup v2, tramite lo script `peg_cgroup_throttle.sh`:
+
+```bash
+# path: /sys/fs/cgroup/peg_gui_rt
+cpu.max      = 1000 6666      # quota 1000 us su periodo 6666 us = 15%
+cpuset.cpus  = 0-2            # la GUI non tocca mai CPU3
+```
+
+⚠️ Il kernel **rifiuta** quote o periodi sotto 1 ms (`write error: Invalid argument`): CFS impone quel minimo. Da qui la scelta `1000 6666` invece di `600 4000`.
+
+**3. Governor di frequenza:**
+
+```bash
+cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor   # performance
+```
+
+**4. PerfMonitor** — `SqCom/RTCHndlr.cpp`:
+
+```c
+PerfMonitor_Init({3}, 10000, "nanosleep_delay_us");
+// finestra di warm-up: 15 000 iterazioni (default), sovrascrivibile con
+// la variabile d'ambiente PERF_WARMUP_ITER
+```
+
+Il warm-up è **necessario**: le prime migliaia di iterazioni contengono i transitori di avvio e falsano il massimo assoluto. Senza di esso PerfMonitor riporta sempre un valore iniziale come caso peggiore.
+
+**5. Verifica dell'ipotesi sulla L2** (da rieseguire su qualsiasi board diversa):
+
+```bash
+cat /sys/devices/system/cpu/cpu3/cache/index2/shared_cpu_list   # 0-3
+cat /sys/devices/system/cpu/cpu3/cache/index2/size              # dimensione L2
+cat /sys/devices/system/cpu/isolated                            # 3
+```
+
+#### Procedura di misura
+
+1. Avviare il cgroup di throttling **prima** di lanciare l'HMI.
+2. Lanciare `Lnk` e l'HMI, poi interagire in modo continuativo per almeno **1 ora** — martellando in particolare i punti noti come critici: scroll del grafico 2D, passaggi rapidi `piece set` ⟷ `manual`, 3D viewer, sequenza manuale.
+3. Terminare con `SIGTERM` (non `SIGKILL`): è il percorso che fa stampare le statistiche finali e salva `/tmp/perf_rt.csv` e `/tmp/perf_rt_worst.csv`.
+4. Annotare anche `cpu.stat` del cgroup: `nr_throttled / nr_periods` dice se la GUI stava effettivamente toccando il tetto.
+
+⚠️ **Test brevi non sono validi.** Vedi la nota metodologica sulla durata: gli eventi sopra i 90 µs valgono ~5 per milione, quindi un test da 10 minuti (150 000 attivazioni) ne contiene statisticamente **meno di uno**. Un massimo di 60 µs su 10 minuti non dice nulla.
+
+### 🎯 Risultato
+
+| Metrica | Valore |
+|---|---|
+| **Ritardo massimo** | **98 µs** |
+| Ritardo minimo | 11 µs |
+| **Attivazioni sopra i 100 µs** | **0 su 1 451 000** |
+| Massimo delle ultime 1 000 attivazioni | 54 µs |
+
+> **L'obiettivo del lavoro — `nanosleep` del thread `COM RTC Handler` costantemente sotto i 100 µs — è raggiunto e verificato su un campione di 1,45 milioni di attivazioni, senza una singola eccezione.**
+
+### Distribuzione della coda
+
+| Fascia | Occorrenze | Per milione | % cumulata |
+|---|---|---|---|
+| 60-70 µs | 1 336 | 920,7 | |
+| 71-80 µs | 152 | 104,8 | |
+| 81-90 µs | 22 | 15,2 | |
+| 91-99 µs | 7 | 4,8 | |
+| **≥ 100 µs** | **0** | **0** | |
+| **Totale ≥ 60 µs** | **1 517** | **1 045,5** | **0,105 %** |
+
+**Il 99,895 % delle attivazioni sta sotto i 60 µs.** La coda decade rapidamente: ogni fascia da 10 µs vale circa un settimo della precedente.
+
+### Progressione lungo tutta la campagna
+
+| Configurazione | Ritardo massimo |
+|---|---|
+| SDL (baseline) | **158 µs** |
+| DRM diretto | 113 µs |
+| \+ coalescing pan 33 ms | 103 µs |
+| **\+ throttling e resto (finale)** | **98 µs** |
+
+**−38 % sul caso peggiore** rispetto al punto di partenza, con l'obiettivo dei 100 µs superato.
+
+### Peggiore iterazione — contatori PMU
+
+Iterazione 417 244, ritardo **98 µs**:
+
+| Contatore | Valore |
+|---|---|
+| `l2d_cache` | 27 388 |
+| `l2d_cache_refill` | **6 003** |
+| miss rate L2 | 21,92 % |
+| `bus_access` | 24 039 |
+| `bus_cycles` | 796 179 |
+| `cpu_cycles` | 1 588 048 |
+| istruzioni | 652 207 |
+| CPI | 2,435 |
+
+**Due conferme indipendenti delle conclusioni della sezione [Ipotesi finale](#ipotesi-finale):**
+
+1. **`bus_cycles / cpu_cycles` = 796 179 / 1 588 048 = 0,5013.** È la **quarta** misura indipendente che cade su 0,50: `bus_cycles` è confermato essere un clock a metà della frequenza CPU, cioè un contatore di tempo, e **non** un indicatore di occupazione del bus.
+
+2. **La densità di miss per istruzione è identica al campione #3** della sezione precedente: 6 003 / 652 207 = **0,0092** contro 5 202 / 567 603 = **0,0092**. Stessa firma, campione diverso, esecuzione diversa.
+
+Scomponendo rispetto al campione #3 (92 µs, 567 603 istruzioni, 1 274 788 cicli):
+
+- Δistruzioni = +84 604 → al CPI base di 2,246 costerebbero **190 020** cicli
+- Δcicli reali = **+313 260**
+- Eccedenza non spiegata dalle istruzioni: **123 240** cicli su **+801** refill = **154 cicli per miss**
+
+Di nuovo dentro l'intervallo 110-212 cicli/miss misurato su tutti gli altri campioni. Il meccanismo è stabile.
+
+### Comportamento del throttling
+
+Da `cpu.stat` del cgroup `peg_gui_rt`:
+
+| Voce | Valore |
+|---|---|
+| `nr_periods` | 1 599 726 |
+| `nr_throttled` | 391 766 → **24,5 % dei periodi** |
+| `throttled_usec` | 1 045 018 877 → **1 045 s** |
+| `usage_usec` | 1 067 620 838 → **1 068 s** |
+
+Il cgroup è rimasto attivo per 1 599 726 × 6 666 µs ≈ **10 663 s (~3 h)**. In quel tempo la GUI ha consumato 1 068 s di CPU, cioè il **10 % di un core** — contro un tetto del 15 %.
+
+**Il dato interessante è la discrepanza:** consumo medio al 10 %, ma il tetto viene toccato in **un periodo su quattro**. La GUI non è pesante *in media*, è **a raffiche**: sta ferma a lungo e poi chiede tutto quello che può in pochi millisecondi. Ed è esattamente il profilo che il meccanismo descritto nell'ipotesi finale prevede come dannoso — una raffica corta che spazza la L2 e se ne va, invece di un carico continuo e prevedibile.
+
+Il throttling è quindi efficace proprio perché **tronca le raffiche**, non perché riduce il lavoro totale.
+
+### Cosa è dimostrato e cosa no
+
+**Dimostrato:** la combinazione di interventi porta il caso peggiore sotto i 100 µs e ce lo tiene per 1,45 milioni di attivazioni consecutive sotto interazione reale. Il risultato è **riproducibile** e ottenuto con modifiche tutte documentate e reversibili.
+
+**Non dimostrato:** che 98 µs sia un limite *garantito*. È il massimo osservato su ~1,6 ore; un test da 24 ore potrebbe trovare code più lunghe. Per un requisito hard real-time servirebbe una campagna di durata molto maggiore e una analisi del caso peggiore teorico, non solo statistica.
+
+**Resta aperto** il meccanismo residuo, analizzato nella sezione seguente: quei 1 517 eventi sopra i 60 µs sono il risultato dell'interferenza sulla L2 condivisa, e l'unica strada per abbatterli ulteriormente è ridurre ancora quante volte al secondo la cache viene spazzata.
+
+---
+
 <a id="ipotesi-finale"></a>
 
 ## 🏁 IPOTESI FINALE (2026-07-30)
 
 Sezione conclusiva dell'indagine sul meccanismo del jitter residuo. Raccoglie la catena di eliminazione, ciò che resta accertato, l'ipotesi che sopravvive a tutti i dati e le piste aperte.
 
+> ### ⚠️ RETTIFICA IMPORTANTE (2026-07-31)
+>
+> **La prima stesura di questa sezione escludeva l'interferenza di memoria. Era sbagliata.**
+>
+> L'esclusione si appoggiava su tre elementi fragili: le misure di **banda** DDR (che però non misurano la **latenza**, e a 10 ms di granularità non possono vedere un evento da 40 µs), la fascia ≥55 µs a riposo (**n = 41**, rumore), e due worst case singoli da sessioni diverse.
+>
+> Il dato che avevo davanti e ho pesato male è il **conteggio delle istruzioni**. Le sezioni che seguono sono state riscritte di conseguenza. Le parti rettificate sono marcate 🔄.
+
 ### 1. Catena di eliminazione — ogni riga chiusa da una misura, non da un ragionamento
 
 | # | Ipotesi | Misura eseguita | Esito |
 |---|---------|-----------------|-------|
-| 1 | **Banda DDR** satura sotto carico | `perf stat -I 10` / `-I 1`, confronto riposo vs carico | ❌ picchi quasi identici (7,8 % vs 9,1 %); media sotto carico **2,3-2,6 %**, la più bassa mai misurata |
-| 2 | **Cache miss** causate dalla GUI | contatori PMU per singola iterazione RT | ❌ non correlano col ritardo; sotto carico sono **meno** (1 380 vs 1 769) |
+| 1 | **Banda DDR** satura sotto carico | `perf stat -I 10` / `-I 1`, confronto riposo vs carico | ✅ **ESCLUSA, e correttamente**: picchi quasi identici (7,8 % vs 9,1 %). Ma vedi §6: il traffico grafico reale è **~72 MB/s**, briciole per la DDR — l'effetto non passa dalla banda |
+| 2 | 🔄 **Cache miss** causate dalla GUI | contatori PMU per singola iterazione RT | ⚠️ **RETTIFICATA — è questa la causa.** L'esclusione si basava su 2 worst case singoli e sulla fascia n=41. Sulle distribuzioni complete, **a istruzioni costanti**, le miss crescono insieme ai cicli e al ritardo (vedi §6) |
 | 3 | **Contesa di latenza** sul bus (+57 % per transazione) | analisi statistica su 10 000 iterazioni | ❌ **ipotesi ritirata**: fondata su 2 soli campioni e su una lettura errata di `BUS_CYCLES` (è un contatore di clock, non di occupazione) |
 | 4 | **Processi utente concorrenti** su CPU3 | `function_graph` attorno a uno spike | ❌ nella finestra critica ci sono solo i due thread RT del test e il kernel |
 | 5 | **Stati di idle profondi** (`cpuidle`) | `latency` e `usage` degli stati | ❌ esistono solo `WFI` (uscita **1 µs**) e `cpu-pd-wait` (1500 µs) usato **573 volte su 9,7 M** |
@@ -5373,41 +5578,224 @@ Sezione conclusiva dell'indagine sul meccanismo del jitter residuo. Raccoglie la
 ### 2. Cosa resta accertato
 
 1. **La GUI cambia la frequenza degli eventi lenti, non la loro gravità.** Confronto fra due distribuzioni complete da 10 000 iterazioni: sotto carico le iterazioni > 25 µs crescono del **+62 %** e quelle > 55 µs del **+132 %**, ma **a parità di ritardo i contatori PMU sono identici** nelle due condizioni.
-2. **Il ritardo è accompagnato da lavoro kernel aggiuntivo, ed è "a gradino".** Le iterazioni pulite consumano ~670-700 k cicli; tutte quelle sopra i 25 µs ne consumano ~750-840 k. Circa **100 000 cicli in più (~60 µs a 1,6 GHz)**, e il salto è netto, non graduale: o quel lavoro c'è, o non c'è.
+2. 🔄 **Il ritardo è accompagnato da ~100 000 cicli in più, MA A ISTRUZIONI COSTANTI.** Le iterazioni pulite consumano ~670-700 k cicli; quelle sopra i 25 µs ne consumano ~750-840 k. *Nella prima stesura avevo attribuito quei cicli a **lavoro kernel aggiuntivo** (un tick in più). È sbagliato*: un tick esegue codice, quindi farebbe salire le **istruzioni** — che invece restano costanti entro il 2 %. Stesse istruzioni + più cicli = **cicli di stallo**. Vedi §6.
 3. **Il ritardo si colloca nel percorso kernel di timer/risveglio.** Il trace mostra la sequenza `arch_timer_handler_phys` → `hrtimer_interrupt` → `__hrtimer_run_queues` → `hrtimer_wakeup` → `try_to_wake_up` → `ttwu_do_activate` → `enqueue_task_rt` → context switch, senza alcun processo utente estraneo.
 4. **CPU3 riceve ~673 interrupt di timer al secondo con Lnk attivo**, contro **0** a Lnk fermo. Di questi, ~250/s sono i risvegli del thread RT stesso (periodo 4 ms): restano **~420/s** di tick dello scheduler. Non sono 1 000/s perché `NO_HZ_IDLE` ne sopprime già gran parte.
 5. **Un dettaglio strutturale dal trace**: la CPU entra in idle **22 µs prima** di dover risvegliare il thread RT, perché `SimPLCFAST` rilascia il core appena prima. Lo scheduler paga l'intero percorso di uscita (`balance_rt`, `balance_fair`, `newidle_balance`, `update_blocked_averages`, context switch) per nulla.
 
-### 3. L'ipotesi finale
+### 3. 🔄 La prova decisiva — due campioni a istruzioni identiche
 
-> **Il jitter residuo nasce nel percorso kernel di risveglio del thread real-time, il cui costo non è costante ma bimodale.**
+Tre worst case stampati da PerfMonitor **nella stessa esecuzione di Lnk**. I campioni **#2** e **#3** costituiscono un esperimento controllato quasi perfetto:
+
+| | **#2** (62 µs) | **#3** (92 µs) | Δ |
+|---|---|---|---|
+| **istruzioni** | 567 692 | 567 603 | **−89 → −0,016 %** |
+| accessi L2 (`l2d_cache`) | 16 806 | 16 718 | −88 → −0,52 % |
+| **refill L2** | 4 517 | 5 202 | **+685 → +15,2 %** |
+| miss rate | 26,88 % | 31,12 % | +4,2 punti |
+| **cpu_cycles** | 1 129 283 | 1 274 788 | **+145 505 → +12,9 %** |
+| **ritardo** | **62 µs** | **92 µs** | **+30 µs → +48 %** |
+
+**Ottantanove istruzioni di differenza su 567 692.** È lo stesso identico percorso di codice, con lo stesso identico numero di accessi in memoria. Cambia solo **quanti di quegli accessi hanno mancato la cache**.
+
+$$\frac{145\,505\ \text{cicli}}{685\ \text{refill}} = 212\ \text{cicli per miss}$$
+
+E i +30 µs di ritardo valgono ~48 000 cicli, cioè il **33 % dello stallo extra finisce sul percorso critico** del risveglio — coerente con il 13-21 % stimato indipendentemente dalle distribuzioni complete.
+
+**Lo stesso confronto sulle distribuzioni da 10 000 iterazioni** (fasce `<25 µs` → `25-34 µs`, che insieme contengono ~95 % dei campioni):
+
+| Dataset | istruzioni | cicli | refill L2 | **cicli per miss** |
+|---|---|---|---|---|
+| **A** riposo | +0,2 % | +146 557 (+21,9 %) | +1 301 (+50,8 %) | **112,7** |
+| **B** carico | −0,5 % | +81 415 (+11,6 %) | +743 (+26,1 %) | **109,6** |
+| **C** carico+PMQoS | +2,0 % | +99 381 (+14,2 %) | +828 (+29,0 %) | **120,0** |
+
+**110-120 cicli per miss**, riprodotti su tre dataset indipendenti. A 1,6 GHz sono **69-75 ns**: la latenza di un accesso alla DRAM. Quei cicli in più **sono** la penalità delle miss, e il conto lo dimostra numericamente.
+
+### 4. 🔄 Due trappole metodologiche da non ripetere
+
+**`bus_cycles` non misura l'attività del bus.** Sui tre worst case il rapporto `bus_cycles / cpu_cycles` vale **0,5026 / 0,5019 / 0,5017**: costante allo 0,2 %. È semplicemente un **clock a metà della frequenza CPU**, cioè un contatore di tempo. Non contiene alcuna informazione oltre a `cpu_cycles`, e ogni metrica derivata (`bus_cycles/bus_access`) misura solo la **densità** degli accessi, non la contesa. Per misurare davvero la contesa servirebbero i performance counter del controller DDR, che stanno fuori dalla CPU.
+
+**Il CPI non va confrontato fra campioni con conteggi di istruzioni diversi.** Il campione #1 ha 195 619 istruzioni contro le 567 600 degli altri due: un fattore **2,9×**. Il suo CPI di 4,26 non significa "memoria più lenta", significa in gran parte "poche istruzioni al denominatore". Lo conferma la densità di memoria del codice:
+
+| | accessi L2 / istruzione |
+|---|---|
+| **#1** | 19 941 / 195 619 = **0,102** |
+| #2 | 16 806 / 567 692 = 0,030 |
+| #3 | 16 718 / 567 603 = 0,029 |
+
+Il campione #1 ha catturato una finestra con codice **3,5× più denso di accessi**: una miss ogni 53 istruzioni contro una ogni 109-126. Con quella densità un CPI di 4,26 è atteso. **Confrontare sempre a istruzioni costanti.**
+
+### 5. Il fatto strutturale che spiega tutto
+
+> **`isolcpus=3` isola lo SCHEDULER, non la CACHE.**
+
+I quattro Cortex-A53 dell'i.MX8M Plus stanno in un **unico cluster con L2 condivisa**. CPU0, CPU1 e CPU2 che disegnano pixel scrivono nella stessa L2 in cui vive il working set del thread RT su CPU3. Nessun parametro del kernel può separarli: è hardware, e l'A53 non ha MPAM né cache partitioning.
+
+Verifica sulla board:
+
+```bash
+cat /sys/devices/system/cpu/cpu3/cache/index2/level            # 2
+cat /sys/devices/system/cpu/cpu3/cache/index2/shared_cpu_list  # 0-3  <-- il punto
+cat /sys/devices/system/cpu/cpu3/cache/index2/size             # dimensione L2
+```
+
+Se `shared_cpu_list` desse `3` soltanto, l'ipotesi cadrebbe in trenta secondi.
+
+**È qui che tutta la catena di eliminazione tornava a vuoto**: cercavo interferenza nello *scheduling* e nella *banda*, mentre il canale è la **cache condivisa**.
+
+### 6. 🔢 L'aritmetica che chiude il cerchio — misurata sulla board
+
+Dalle mappature DRM del processo dell'HMI:
+
+```
+ffffa0d98000-ffffa0ec4000 rw-s /dev/dri/card1
+ffffa0ec4000-ffffa0ff0000 rw-s /dev/dri/card1
+```
+
+Entrambe misurano `0x12C000` = **1 228 800 byte**. A 2 byte/pixel (RGB565) fanno 614 400 pixel, cioè **1024 × 600**. Sono i due buffer del double buffering, **1,2 MB l'uno**.
+
+#### 6.1 Una copia a schermo intero è più grande della cache
+
+Con L2 = 512 KB condivisa:
+
+| Grandezza | Valore | Rapporto con la L2 |
+|---|---|---|
+| Un buffer a schermo intero | 1,2 MB | **2,4×** |
+| Una copia completa (1,2 MB letti + 1,2 MB scritti) | 2,4 MB | **~5×** |
+
+**Dopo ogni blit a schermo intero, in L2 non sopravvive nulla di quello che c'era prima** — incluso tutto il working set del thread RT su CPU3. Non è "un po' di pressione sulla cache": è una **cancellazione completa**.
+
+#### 6.2 Il conto 30/250 — perché la frequenza degli eventi lenti è quella che è
+
+Con il coalescing del pan a **33 ms** sei attorno a **30 ridisegni al secondo**. Il thread RT si sveglia ogni **4 ms**, cioè **250 volte al secondo**.
+
+$$\frac{30\ \text{spazzate/s}}{250\ \text{risvegli/s}} = 12\ \%$$
+
+**Circa un risveglio su otto cade subito dopo che la cache è stata spazzata.**
+
+Confronto con la misura reale:
+
+| | Iterazioni > 25 µs |
+|---|---|
+| A riposo | 1 290 / 10 000 = **12,9 %** |
+| Sotto carico GUI | 2 092 / 10 000 = **20,9 %** |
+| **Aumento** | **+8,0 punti percentuali** |
+
+**8 punti misurati contro 12 previsti** dal conto puramente geometrico. Stesso ordine di grandezza, e la differenza va nella direzione attesa: non tutti i frame sono a schermo pieno, molti passano dal percorso a rettangolo dirty che sposta molto meno.
+
+È una **predizione quantitativa indipendente**, derivata solo da risoluzione, dimensione della L2 e periodi dei due processi — e cade sul valore misurato. Nessuna delle ipotesi alternative produce un numero del genere.
+
+#### 6.3 E spiega l'ultima cosa che non tornava: la banda
+
+$$30\ \text{blit/s} \times 2,4\ \text{MB} \approx 72\ \text{MB/s}$$
+
+Su DDR4 sono **briciole**: frazioni di percento della banda disponibile. Ed ecco perché tutte le misure di banda scagionavano la memoria — **e avevano ragione**.
+
+> **La banda non c'entra davvero. È traffico irrisorio che ha un effetto devastante sulla cache, perché ogni singola passata è più grande della cache stessa.**
+
+È esattamente lo scenario che il programma `stress_mem` (in `tracing_Imx8plus/stress_mem/`) chiama **`thrash`**: sfratto massimo, banda minima. La modalità è stata scritta *prima* di conoscere questo numero, e si è rivelata quella che riproduce il caso reale.
+
+### 7. 🔄 L'ipotesi finale (versione corretta)
+
+> **Il jitter residuo è interferenza di memoria sulla L2 condivisa del cluster Cortex-A53.**
 >
-> La GUI **non rallenta direttamente** quel percorso: nessuna misura mostra contesa di memoria, di banda o di cache. Ciò che fa è **aumentare la probabilità che il risveglio coincida con altro lavoro kernel periodico** — tick dello scheduler, accounting cgroup, aggiornamento PELT, percorso di bilanciamento pre-idle — che aggiunge il "gradino" di ~100 000 cicli osservato.
+> Ogni blit a schermo intero della GUI muove **2,4 MB attraverso una cache da 512 KB**, azzerandone il contenuto. Il thread RT su CPU3, che si sveglia 250 volte al secondo, trova periodicamente il proprio working set sfrattato: il percorso kernel di risveglio esegue **le stesse identiche istruzioni** ma subisce **~700-1 300 miss L2 in più**, a **~110-210 cicli l'una**, e ne esce con decine di microsecondi di ritardo.
 >
-> Da qui la firma caratteristica dei dati: sotto carico **cambia la frequenza degli eventi lenti, non la loro gravità**, e il caso peggiore resta ancorato attorno ai 100-135 µs in ogni configurazione provata.
+> La GUI non cambia il **meccanismo** né la **gravità** dell'evento: cambia **quante volte al secondo la cache viene spazzata**, e quindi la **frequenza** con cui un risveglio ne paga il prezzo.
 
 **Perché questa formulazione regge a tutti i dati:**
 
-| Osservazione | Spiegazione nell'ipotesi finale |
-|--------------|--------------------------------|
+| Osservazione | Spiegazione |
+|--------------|-------------|
+| Istruzioni costanti, cicli in più | Stallo su memoria, non lavoro aggiuntivo |
+| 110-120 cicli per miss su 3 dataset | È la latenza DRAM: i cicli extra *sono* la penalità delle miss |
+| Banda DDR bassissima e identica a riposo/carico | Il traffico è ~72 MB/s: l'effetto passa dalla **cache**, non dalla banda |
 | Contatori identici a parità di ritardo | Il meccanismo è lo stesso; cambia solo quanto spesso si innesca |
-| Salto "a gradino" nei cicli | O il lavoro kernel periodico cade nella finestra, o non ci cade |
-| Il throttling migliora le medie ma non il massimo | Riduce quanto spesso la GUI è attiva, non il costo del percorso quando la collisione avviene |
-| Isolare i core non ha protetto | `isolcpus` toglie il bilanciamento, non il tick né gli hrtimer |
-| Le ottimizzazioni efficaci riducono i pixel toccati | Meno lavoro GUI ⇒ meno occasioni di collisione ⇒ meno eventi lenti |
+| `isolcpus=3` non ha protetto | Isola lo scheduler, **non la L2 condivisa** |
+| Il passaggio SDL → DRM ha dato −98 % | SDL faceva **2** copie a schermo intero per frame invece di 1: metà delle spazzate |
+| Il coalescing del pan a 33 ms ha funzionato | Dimezza le spazzate al secondo |
+| Il throttling migliora la media ma non il massimo | Riduce la frequenza delle spazzate, non il costo di una singola |
 | PM QoS senza effetto | Il costo non è nell'ingresso/uscita da idle |
+| +8 punti di iterazioni lente sotto carico | Predetto **12 %** dal rapporto 30/250 |
 
-**Livello di confidenza:** l'ipotesi è **coerente con tutti i dati raccolti** e ogni alternativa è stata esclusa con una misura. Non è però **dimostrata**: manca l'esperimento che rimuova la sorgente periodica e mostri il collasso della coda. Va presentata come l'ipotesi che sopravvive al vaglio, non come un fatto accertato.
+**Livello di confidenza:** l'ipotesi è coerente con **tutti** i dati, ha una **predizione quantitativa verificata** (§6.2) e un **meccanismo fisico misurato** (§3). Manca ancora la prova **causale** diretta — il test `stress_mem`, che riproduce il jitter senza una sola riga di codice grafico. Finché quel test non è fatto, va presentata come l'ipotesi che sopravvive al vaglio e predice correttamente, non come un fatto dimostrato.
 
-### 4. Piste aperte, in ordine di rapporto beneficio/rischio
+### 8. 🧪 L'esperimento che chiude la questione — `stress_mem`
 
-1. **`nohz_full=3 rcu_nocbs=3` nella cmdline** (attualmente c'è solo `isolcpus=3`; `/sys/devices/system/cpu/nohz_full` è **vuoto**). Rimuoverebbe i ~420 tick/s residui su CPU3. ⚠️ Guadagno **limitato e incerto**: `NO_HZ_IDLE` già sopprime la maggior parte del tick, e `nohz_full` è efficace **solo con un unico task runnable** sulla CPU — condizione non soddisfatta finché due thread RT condividono il core. Richiede riavvio.
-2. **Il secondo thread real-time (`SimPLCFAST`) sul core isolato.** È ciò che impedisce a `nohz_full` di funzionare e che provoca l'ingresso in idle 22 µs prima del risveglio. Da chiarire **se esista un equivalente in produzione o se sia un artefatto del banco di prova**: la risposta cambia completamente la valutazione. Se è reale, spostarlo su un altro core o fonderlo col thread RTC renderebbe efficace il punto 1.
-3. **Continuare a ridurre il lavoro della GUI.** È l'unica leva che ha dimostrato empiricamente di funzionare, ed è coerente con l'ipotesi: meno lavoro grafico ⇒ meno occasioni di collisione. Interventi già individuati e documentati: le 3 copie ridondanti del percorso 3D, `Posiziona` (~50 % del costo) dentro il disegno della pagina Manual Sequence, la scrittura diretta del rasterizzatore nel framebuffer PegLib.
+Cartella `tracing_Imx8plus/stress_mem/` — programma C e `PROCEDURA.md` completa.
 
-### 5. Cosa NON provare (già escluso, con la misura che lo esclude)
+Genera traffico di memoria controllato su CPU0-2 **senza alcuna GUI**, in tre modalità:
 
-Partizionare la banda o la cache (impossibile su Cortex-A53, niente MPAM), abbassare ulteriormente la quota cgroup (migliora la media, non il massimo — dimostrato), disabilitare gli stati di idle (fatto, nessun effetto), forzare la frequenza (già a `performance`), agire sul raffreddamento (45 °C di margine termico).
+| Modalità | Buffer | Banda DDR | Sfratto L2 | Ruolo |
+|---|---|---|---|---|
+| `l2fit` | 64 KB | ~nulla | ~nullo | **controllo negativo** |
+| `stream` | 8 MB | alta | alto | **trattamento** |
+| `thrash` | 8 MB, passo 64 B, con pausa | **bassa** | alto | **discriminante** |
+
+| `l2fit` | `stream` | `thrash` | Conclusione |
+|---|---|---|---|
+| no | **sì** | **sì** | **Sfratto della L2 condivisa** — ipotesi confermata |
+| no | sì | no | Saturazione della banda DDR |
+| sì | sì | sì | Non è la memoria: è il carico di CPU in sé |
+| no | no | no | Ipotesi da rifare |
+
+Il confronto che conta è **`stream` contro `thrash`**: stesso sfratto, banda molto diversa. Se il jitter è simile, la banda è definitivamente scagionata.
+
+**Curva dose-risposta** (opzionale, ma vale molto in tesi): ripetere `stream` con buffer 1, 2, 4, 8, 16 MB. Un **ginocchio** quando il buffer supera la dimensione della L2 è la firma inconfondibile del cache thrashing, e non la spiega nessun'altra ipotesi.
+
+### 9. 🎯 Piano d'azione, riordinato attorno al meccanismo corretto
+
+Il bersaglio **non** è ridurre la banda. È **ridurre quante volte al secondo la L2 viene spazzata**.
+
+| # | Intervento | Sforzo | Resa attesa |
+|---|---|---|---|
+| **0** | **Verificare `kFullSyncDamageRatioPercent`** — contare quanto spesso `blitDirtyRegion` cade sul ramo a schermo intero (`pegdrmoutput.cpp:639` e `:652`) invece che sul rettangolo dirty. Se durante lo scroll del grafico 2D la soglia viene superata sempre, **alzarla è una riga di codice** | **nullo** | potenzialmente alta |
+| **1** | **Eliminare le 3 copie ridondanti del percorso 3D** — ognuna vale 1,2 MB, cioè **quanto tutto il passaggio SDL→DRM** | basso | alta, già dimostrata |
+| **2** | **Togliere `Posiziona` (~50 % del costo) dal percorso di disegno** della pagina Manual Sequence | basso | media |
+| **3** | **Store non-temporali (`LDNP`/`STNP`) in `copyRectFromSource`** (`pegdrmoutput.cpp:485`, due sole `memcpy` alle righe 504 e 515) | medio | ⚠️ **incerta** — vedi §10 |
+| **4** | **Blitter 2D hardware (G2D)** — porta i pixel in DRAM via DMA senza passare dalle cache dei core. Non è un hint: è un altro pezzo di silicio | alto | massima, strutturale |
+
+**Cosa NON provare** (già escluso, con la misura che lo esclude): `nohz_full` (guadagno limitato e ora sappiamo che non è quello il meccanismo), partizionare la cache (impossibile su A53, niente MPAM), PM QoS (testato, nessun effetto), abbassare ancora la quota cgroup (migliora la media, non il massimo), forzare la frequenza (già `performance`), raffreddamento (45 °C di margine).
+
+### 10. ⚠️ Sulle istruzioni non-temporali — tre motivi per misurare prima di implementare
+
+L'intervento #3 è chirurgico (`copyRectFromSource` è l'unico punto da cui passa tutto il traffico grafico), ma **potrebbe non dare nulla**:
+
+1. **Il Cortex-A53 potrebbe ignorare il hint.** In ARMv8 "non-temporal" è un **suggerimento che l'implementazione può ignorare**. L'A53 è un core in-order semplice: c'è una probabilità concreta che tratti `LDNP`/`STNP` esattamente come `LDP`/`STP`.
+2. **La destinazione potrebbe già essere write-combining.** I dumb buffer DRM lo sono tipicamente: in quel caso le scritture già bypassano la cache e metà del beneficio non esiste.
+3. **La sorgente è appena stata scritta dal rasterizzatore**, quindi quelle linee sono già in cache e sporche: devono comunque finire in DRAM.
+
+**Come deciderlo in mezz'ora invece che in tre giorni:** aggiungere a `stress_mem` una modalità `streamnt` che fa la stessa copia da 8 MB con `LDNP`/`STNP` invece di `memcpy`, e confrontare il jitter di CPU3 fra `stream` e `streamnt`. Se non cambia nulla, l'A53 ignora il hint e la strada è chiusa — **senza aver toccato una riga del codice di produzione**.
+
+Implementazione di riferimento:
+
+```c
+#if defined(__aarch64__)
+static inline void peg_copy_nt(void *dst, const void *src, size_t n)
+{
+    unsigned char       *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+
+    while (n > 0 && ((uintptr_t)s & 15u)) { *d++ = *s++; --n; }   /* allinea a 16 B */
+
+    while (n >= 64) {                        /* una linea di cache per giro */
+        __asm__ __volatile__(
+            "ldnp   q0, q1, [%[s], #0]  \n\t"
+            "ldnp   q2, q3, [%[s], #32] \n\t"
+            "stnp   q0, q1, [%[d], #0]  \n\t"
+            "stnp   q2, q3, [%[d], #32] \n\t"
+            :
+            : [s] "r" (s), [d] "r" (d)
+            : "memory", "v0", "v1", "v2", "v3");
+        s += 64; d += 64; n -= 64;
+    }
+    if (n) memcpy(d, s, n);
+}
+#else
+#  define peg_copy_nt(d, s, n) memcpy((d), (s), (n))
+#endif
+```
 
 > **Conclusione operativa del lavoro (formulazione prudente).** Il caso peggiore residuo **non** è spiegato dalla banda DDR media, né si riduce con le manopole dello scheduler quando è dominato da singole operazioni pesanti. La direzione con maggiore probabilità di successo resta **ridurre il lavoro per disegno**: meno passate sui pixel (le 3 copie del 3D viewer), meno frame (coalescing del pan — già fatto, efficace), e togliere dal percorso di disegno ciò che non disegna (`Posiziona`, ~50% di un redraw della pagina Manual Sequence). Quale sia il meccanismo *fisico* preciso con cui questo lavoro disturba il thread RT — banda a raffiche, cache, page fault, lock — **resta da determinare** con la misura a 10 ms sopra.
 
