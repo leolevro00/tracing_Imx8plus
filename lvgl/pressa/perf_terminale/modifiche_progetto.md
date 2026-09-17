@@ -91,7 +91,7 @@ SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr);   // nullptr,nullptr = 
 SDL_RenderPresent(m_renderer);                             // attesa BLOCCANTE sul vsync
 ```
 
-**Dopo.** Scrittura diretta sui *dumb buffer* DRM, double buffering con `drmModePageFlip` **non bloccante** (`DRM_MODE_PAGE_FLIP_EVENT`), copia del solo rettangolo modificato (`blitDirtyRegion` / `copyRectFromSource`) con logica di *catch-up*, e nessun coinvolgimento della GPU.
+**Dopo.** Scrittura diretta sui *dumb buffer* DRM, double buffering con `drmModePageFlip`, copia del solo rettangolo modificato (`blitDirtyRegion` / `copyRectFromSource`) con logica di *catch-up*, e **nessun coinvolgimento della GPU**.
 
 #### Il conteggio effettivo, per frame presentato
 
@@ -103,7 +103,7 @@ SDL_RenderPresent(m_renderer);                             // attesa BLOCCANTE s
 | Snapshot a schermo intero | — | **1,2 MB letti + 1,2 MB scritti** (`syncBackFromPeg`) |
 | **Traffico totale a schermo intero** | **3,6 MB** | **2,4 MB** |
 | Conversione di formato | possibile RGB565 → ARGB8888 | nessuna |
-| Present | **bloccante** sul vsync | non bloccante |
+| Attesa sul vsync | bloccante (dentro `SDL_RenderPresent`) | **bloccante lo stesso** (`select()` sull'evento DRM) |
 | GPU coinvolta | sì | **no** |
 
 **−33 % di traffico**, che diventa **−60 %** se la conversione a ARGB8888 avveniva davvero (il codice contiene una diagnostica dedicata a rilevarla).
@@ -121,10 +121,23 @@ I due *dumb buffer* sono verificabili sulla board: `grep dri /proc/<pid>/maps` m
 
 #### Perché il ritardo è migliorato, in ordine di peso
 
-1. **L'attesa bloccante sul vsync è sparita.** `SDL_RenderPresent` con vsync **blocca il thread** nel kernel fino alla scansione successiva: la GUI si addormentava e si risvegliava 60 volte al secondo, con context switch e attività di scheduler a ogni giro, e tutto il lavoro concentrato in una raffica dopo ogni vsync. Con `drmModePageFlip` + evento di completamento il thread **non si blocca mai**.
-2. **La GPU è uscita di scena.** `SDL_RenderCopy` su kmsdrm/GLES2 comporta sottomissione di comandi, binding della texture, un quad texturizzato a schermo pieno, fence e interrupt: lavoro kernel aggiuntivo sui core 0-2 e traffico DDR generato dalla GPU. Con PegGL che è comunque un rasterizzatore **software**, la GPU serviva solo a fare una copia che la CPU poteva fare da sé.
-3. **Un terzo di byte in meno attraverso la L2 condivisa**, cioè meno sfratti del working set del thread RT.
-4. **Nessuna conversione di formato** e **un buffer in meno** in memoria.
+1. **La GPU è uscita di scena.** `SDL_RenderCopy` su kmsdrm/GLES2 comporta sottomissione di comandi, binding della texture, un quad texturizzato a schermo pieno, fence e interrupt: lavoro kernel aggiuntivo sui core 0-2, traffico DDR generato dalla GPU e i lock del driver grafico. Con PegGL che è comunque un rasterizzatore **software**, la GPU serviva solo a fare una copia che la CPU può fare da sé.
+2. **Un terzo di byte in meno attraverso la L2 condivisa**, cioè meno sfratti del working set del thread RT — il meccanismo descritto al §4.
+3. **Nessuna conversione di formato** e **un buffer in meno** in memoria.
+
+> ⚠️ **Seconda rettifica — l'attesa sul vsync NON è sparita.** Una stesura precedente attribuiva il miglioramento anche all'eliminazione dell'attesa bloccante. È falso. `DRM_MODE_PAGE_FLIP_EVENT` rende non bloccante la **ioctl**, ma subito dopo `PegDrmOutput::pageFlip()` si mette in attesa finché l'evento non arriva, cioè fino al vsync:
+>
+> ```cpp
+> drmModePageFlip(m_fd, m_crtcId, nextFb, DRM_MODE_PAGE_FLIP_EVENT, this);
+> m_flipPending = true;
+> while (m_flipPending)                      // attende evento page_flip (vsync)
+> {
+>     select(m_fd + 1, &fds, nullptr, nullptr, &tv);
+>     drmHandleEvent(m_fd, &eventCtx);
+> }
+> ```
+>
+> Il commento nell'header lo dichiara: `pageFlip(); // drmModePageFlip (attende evento)`. **Entrambi i percorsi bloccano sul vsync**: il guadagno viene da GPU, traffico di memoria e conversione di formato, non da qui.
 
 **Resa:** sforamenti ridotti del **98 %**, massimo da **158 a 113 µs**.
 
@@ -328,6 +341,32 @@ In ordine di rapporto fra beneficio atteso e sforzo:
 
 **È l'intervento con il rapporto beneficio/sforzo più alto rimasto, e colpisce esattamente il meccanismo individuato.**
 
+#### Premessa necessaria: *ridisegnare* non è *copiare*
+
+È la distinzione senza la quale il resto di questa sezione si legge male. Il percorso da una modifica sullo schermo al pixel visualizzato ha **quattro fasi**, e solo una è a schermo intero:
+
+```
+1. PEG rasterizza          →  disegna SOLO i widget invalidati nel framebuffer PEG
+        ↓
+2. uploadDirtyRegion()     →  blitDirtyRegion: copia SOLO il rettangolo cambiato
+        ↓
+3. flushPresent()          →  syncBackFromPeg: copia TUTTO lo schermo      ← il problema
+        ↓
+4. pageFlip()              →  scambio di puntatore, nessuna copia
+```
+
+**Le fasi 1 e 2 sono corrette e incrementali.** Il meccanismo di invalidazione di PegLib funziona: se cambia un solo campo di testo, viene rasterizzato solo quel campo. Nessuno ridisegna poligoni, testi o griglie a schermo intero.
+
+**Solo la fase 3 è a schermo intero.** Ed è una `memcpy`, non un disegno: prende 1,2 MB di pixel **già pronti** dal framebuffer PEG e li riversa nel buffer DRM, inclusi tutti quelli identici a prima.
+
+> **Non si ridisegna l'interfaccia. La si ricopia.**
+
+E non a ogni modifica: `flushPresent` è limitata in frequenza (`rtPresentIntervalMs`) e scatta solo se c'è qualcosa da presentare — al massimo ~30 volte al secondo. Ma **quando scatta, copia tutto, anche se era cambiato un pixel.**
+
+**Perché questa è in realtà una buona notizia.** La parte *costosa* — la rasterizzazione software, che deve calcolare poligoni, riempimenti e testo — è già ottimizzata e incrementale. Quella che spreca è la parte concettualmente banale, una copia di memoria. Ne segue che l'intervento **non richiede di toccare la logica di disegno**, che è complessa e fragile: basta smettere di copiare byte che sono già al posto giusto.
+
+#### Perché quella copia esiste
+
 **Il problema.** Il double buffering fa sì che ogni buffer, mentre è a video, "perda" gli aggiornamenti applicati all'altro. Esistono due modi di rimediare, e **il codice li applica entrambi**:
 
 | Approccio | Dove | Costo |
@@ -337,14 +376,89 @@ In ordine di rapporto fra beneficio atteso e sforzo:
 
 Il secondo viene eseguito **dopo** il primo e lo **sovrascrive integralmente**: tutto il lavoro di tracciamento del danno viene buttato via.
 
-**L'ordine di grandezza.** Muovendo uno slider che cambia 50×20 pixel:
+#### Il conteggio esatto per una singola pressione di pulsante
 
-| | Byte copiati |
-|---|---|
-| `blitDirtyRegion` — utile | 50 × 20 × 2 = **2 000** |
-| `syncBackFromPeg` — ridondante | 1024 × 600 × 2 = **1 228 800** |
+Tracciato sul codice, non stimato. Costanti: schermo **1024 × 600 RGB565** (2 byte/pixel) → schermo intero = **1 228 800 byte**; soglia `kFullSyncDamageRatioPercent = 15` → **92 160 pixel**. Pulsante da **120 × 40 px** = 4 800 pixel = 9 600 byte.
 
-**Circa 600 volte più del necessario.** E il conto quadra con la misura: 2,4 MB × 30 present/s = **72 MB/s**, esattamente il valore del §4.4 — che quindi proviene **tutto** da `syncBackFromPeg`, non dai rettangoli dirty.
+**Fase 1 — PEG rasterizza.** Disegna solo il widget invalidato: ~**9 600 byte scritti**.
+
+**Fase 2 — la regione dirty viene accodata**, in `mergeDirtyRegion()`.
+
+> ⚠️ Non accoda i rettangoli: ne calcola il **bounding box**. Se una pressione ridisegna due widget lontani, il rettangolo risultante è il riquadro che li contiene entrambi, **inclusa tutta l'area intatta in mezzo**. Il contatore `s_rtStatsMaxRectArea` esiste apposta per accorgersene.
+
+**Fase 3 — `blitDirtyRegion`.** Il back buffer si porta dietro la zona persa mentre era a video (`m_staleDamage`):
+
+| Ramo | Condizione | Byte mossi |
+|---|---|---|
+| recupero *stale* parziale | `stalePx < 92 160` | 2 × area stale |
+| recupero *stale* integrale | `stalePx ≥ 92 160` | **2 457 600** |
+| rettangolo corrente | sempre | 2 × 9 600 = **19 200** |
+
+**Fase 4 — `flushPresent`.**
+
+```cpp
+for (int i = 0; i < kMaxDirtyDrain; ++i)   // fino a 8 giri
+    processPendingUpdates();               // ognuno può richiamare blitDirtyRegion
+
+syncBackFromPeg(...);                      // COPIA INTEGRALE, incondizionata
+pageFlip();                                // blocca fino al vsync
+```
+
+`syncBackFromPeg` → **1 228 800 letti + 1 228 800 scritti = 2 457 600 byte**.
+
+#### Il totale
+
+| Operazione | Byte mossi | Quota |
+|---|---|---|
+| Rasterizzazione del pulsante | 9 600 | 0,4 % |
+| `blitDirtyRegion` — rettangolo corrente | 19 200 | 0,8 % |
+| Recupero *stale* (tipico, piccolo) | ~19 200 | 0,8 % |
+| **`syncBackFromPeg`** | **2 457 600** | **97,9 %** |
+| `pageFlip` | 0 | — |
+| **Totale** | **≈ 2,51 MB** | |
+
+> **Premere un pulsante da 120×40 muove circa 2,5 MB di memoria. Il lavoro utile sono ~29 KB: l'1,2 %.**
+>
+> E quei 2,4 MB attraversano una L2 da 512 KB, cioè la **azzerano quasi cinque volte**.
+
+Il conto quadra con la misura aggregata: 2,4 MB × 30 present/s = **72 MB/s**, esattamente il valore del §4.4 — che quindi proviene **tutto** da `syncBackFromPeg`, non dai rettangoli dirty.
+
+#### ⚠️ Conseguenza: la strumentazione RT esistente non vede questo traffico
+
+Il blocco `EMBEDDED_HMI_RT_STATS` che stampa
+
+```
+[RT] uploadDirtyRegion: calls=%u req=%.2fMB reqMBps=%.2f updateMs=%.3f effMBps=%.1f maxRectPx=%llu
+```
+
+calcola `rtBytes = rect.w * rect.h * bytesPerPixel()` — **solo il rettangolo dirty, contato una volta sola** — e cronometra **solo** `blitDirtyRegion`. `syncBackFromPeg` sta dentro `flushPresent`, fuori da quel blocco.
+
+**Tutti i valori di `reqMBps` letti finora sottostimano quindi il traffico reale di circa due ordini di grandezza.** Ogni conclusione tratta da quel numero va riletta alla luce di questo.
+
+#### Come misurare il valore vero
+
+Due contatori in `flushPresent` e uno in `copyRectFromSource`:
+
+```cpp
+// [AI-MEM] temporaneo — quantificare il traffico reale per present
+static uint64_t s_bytesFull = 0, s_bytesDirty = 0;
+static unsigned s_presents = 0;
+
+if (m_framebuffer)
+{
+    PegFrameBufferLock lock;
+    (void)m_drmOutput->syncBackFromPeg(m_framebuffer, framePitchBytes());
+    s_bytesFull += 2ull * m_width * m_height * bytesPerPixel();   // letti + scritti
+}
+if ((++s_presents % 100) == 0)
+{
+    fprintf(stderr, "[AI-MEM] presents=%u full=%.1fMB dirty=%.1fMB ratio=%.0fx\n",
+            s_presents, s_bytesFull/1048576.0, s_bytesDirty/1048576.0,
+            s_bytesDirty ? (double)s_bytesFull/s_bytesDirty : 0.0);
+}
+```
+
+con `s_bytesDirty += 2ull * rectW * rectH * 2;` dentro `copyRectFromSource`. Il rapporto dà **esattamente** quanto si sta sprecando, per ogni schermata e per ogni tipo di interazione.
 
 **La correzione è di due righe**, e la funzione che serve **esiste già ma non è mai chiamata da nessuna parte** (`PegDrmOutput::needsFullSyncBeforeFlip()`, `pegdrmoutput.cpp:537` — codice morto):
 
@@ -359,17 +473,188 @@ if (m_framebuffer && m_drmOutput->needsFullSyncBeforeFlip())
 
 ⚠️ **Non è automaticamente sicura.** La copia incondizionata è una rete di sicurezza: se la logica di *catch-up* avesse un difetto, la ricopiatura totale lo nasconde. Il commento nel codice lo dice esplicitamente (*"evita artefatti da back buffer parziale"*). La sequenza corretta è: attivare la condizione → **verificare visivamente** durante scroll, cambi pagina e visualizzatore 3D → solo se non compaiono artefatti, misurare il guadagno RT con una sessione da un'ora.
 
-### 7.2 Gli altri interventi
+#### Quanto vale, in tempo di CPU — stima da verificare in cinque minuti
 
-1. **Verificare `kFullSyncDamageRatioPercent`** — contare quanto spesso il blit ricade sul ramo a schermo intero invece che sul rettangolo modificato. Se durante lo scroll del grafico 2D la soglia viene superata sistematicamente, alzarla è **una riga di codice**. Costo nullo, beneficio potenzialmente alto. *(Diventa rilevante solo dopo il §7.1: finché lo snapshot integrale è incondizionato, questa soglia non cambia nulla.)*
+Una `memcpy` di 2,4 MB (1,2 letti + 1,2 scritti) su Cortex-A53 sta plausibilmente fra **1,2 e 2,4 ms**. A 30 present al secondo:
 
-2. **Eliminare le 3 copie ridondanti nel percorso 3D** — ognuna vale 1,2 MB, cioè quanto l'intero passaggio da SDL a DRM.
+$$30 \times (1{,}2 \div 2{,}4)\ \text{ms} = 36 \div 72\ \text{ms di CPU al secondo} = 3{,}6\ \% \div 7{,}2\ \%\ \text{di un core}$$
 
-3. **Togliere `Posiziona` dal percorso di disegno** della pagina Manual Sequence: misurato a **832 µs di CPU, il 49,8 %** del costo di un ridisegno, per un'operazione che non disegna.
+Dal `cpu.stat` del cgroup nel test finale, la GUI ha consumato in media il **10 % di un core**.
 
-4. **Prova causale definitiva** — programma `stress_mem` (già scritto, in `tracing_Imx8plus/stress_mem/`): genera traffico di memoria controllato su CPU0-2 **senza alcuna GUI**, in tre modalità che separano *banda* da *sfratto della cache*. Se riproduce il jitter, la catena causale è chiusa in modo incontrovertibile.
+> Se la stima regge, **`syncBackFromPeg` da sola vale fra un terzo e due terzi di tutto il tempo di CPU consumato dalla GUI** — per un lavoro in larghissima parte ridondante.
 
-5. **Blitter 2D hardware (G2D)** — intervento strutturale: porta i pixel in DRAM via DMA senza passare dalle cache dei core.
+**La misura costa cinque minuti** e va fatta *prima* di rischiare artefatti visivi, perché dice subito quanto c'è da guadagnare:
+
+```cpp
+// peglvglwindow.cpp, flushPresent() — strumentazione temporanea
+struct timespec t0, t1;
+clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t0);
+(void)m_drmOutput->syncBackFromPeg(m_framebuffer, framePitchBytes());
+clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t1);
+// accumulare e stampare una riga ogni 100 chiamate, non a ogni frame
+```
+
+Il tempo va misurato con `CLOCK_THREAD_CPUTIME_ID` e non con il tempo trascorso: con il throttling cgroup attivo il thread viene deschedulato a metà della copia, e il tempo di parete misurerebbe l'attesa invece del lavoro.
+
+### 7.2 🥈 Rivedere la soglia `kFullSyncDamageRatioPercent`
+
+**Da affrontare subito dopo il §7.1**, perché finché lo snapshot integrale è incondizionato questa soglia non cambia nulla: si copia comunque tutto lo schermo un istante dopo.
+
+#### Che cos'è
+
+```cpp
+static const int kFullSyncDamageRatioPercent = 15;   // pegdrmoutput.h:91
+```
+
+$$1024 \times 600 = 614\,400 \text{ pixel} \quad\longrightarrow\quad 614\,400 \times \frac{15}{100} = 92\,160 \text{ pixel}$$
+
+**92 160 pixel = il 15 % dello schermo**, cioè **184 320 byte** contro i 1 228 800 di uno schermo intero.
+
+#### Che decisione governa
+
+```cpp
+// pegdrmoutput.cpp:648 — dentro blitDirtyRegion
+const int thresholdPx = (fbPixels * kFullSyncDamageRatioPercent) / 100;
+const int stalePx = damagePixelCount(stale, m_width, m_height);
+if (stalePx >= thresholdPx)      // scroll pesante: bbox non basta
+    copyRectFromSource(src, srcPitch, dstBuf, 0, 0, m_width-1, m_height-1);  // TUTTO
+else
+    copyRectFromSource(src, srcPitch, dstBuf,
+        stale.left, stale.top, stale.right, stale.bottom);                    // solo la zona
+```
+
+La domanda che il codice si pone è: *"il buffer di dietro si è perso una zona mentre era a video: quanto è grande?"*
+
+- **meno del 15 %** → copio solo quella zona
+- **15 % o più** → tanto vale copiare tutto
+
+#### Il fatto geometrico che sta sotto: una fascia a tutta larghezza è memoria contigua
+
+È la chiave per capire quando la soglia serve e quando fa danno.
+
+Un framebuffer è memoria lineare: ogni riga occupa `pitch` byte — qui 1024 px × 2 = **2 048 byte** — e le righe stanno una dopo l'altra.
+
+**Caso A — regione a tutta larghezza (righe 100-499):**
+
+```
+offset 100 × 2048  ┌────────────────────────────────┐
+                   │ riga 100  (2048 byte)          │
+                   │ riga 101  (2048 byte)          │   nessun buco:
+                   │ ...                            │   un unico blocco
+                   │ riga 499  (2048 byte)          │
+offset 500 × 2048  └────────────────────────────────┘
+                     400 × 2048 = 819 200 byte CONTIGUI
+```
+
+La riga 100 finisce **esattamente** dove comincia la 101: è un solo blocco di memoria.
+
+**Caso B — rettangolo parziale (colonne 200-699, righe 100-499):**
+
+```
+riga 100:   ........[████████████]..........
+riga 101:   ........[████████████]..........   ← fra una riga utile e la
+riga 102:   ........[████████████]..........      successiva ci sono
+   ...                                            1048 byte da saltare
+riga 499:   ........[████████████]..........
+```
+
+I dati utili sono **400 frammenti separati**, con un salto in mezzo.
+
+Ed è esattamente ciò che discrimina `copyRectFromSource`:
+
+```cpp
+if (left == 0 && rectW == m_width && srcPitch == dstPitch)
+{
+    std::memcpy(dst.map + top*dstPitch, src + top*srcPitch,
+                (size_t)rectH * (size_t)dstPitch);     // UNA SOLA memcpy
+    return;
+}
+for (int row = 0; row < rectH; ++row)
+    std::memcpy(dstRow, srcRow, rectW * 2u);           // una memcpy PER RIGA
+```
+
+| | Chiamate a `memcpy` |
+|---|---|
+| **Caso A** (tutta larghezza) | **1**, da 819 200 byte |
+| **Caso B** (parziale) | **400**, da 1 000 byte |
+
+**La soglia è pensata per il caso B**: quando devi fare centinaia di copie frammentate, a un certo punto conviene una sola copia grande e contigua di tutto lo schermo, anche se muove più byte. Il ragionamento è corretto.
+
+**Nel caso A però la frammentazione non esiste.** La fascia è già un blocco unico, già nel percorso veloce, già una sola `memcpy`. Copiare tutto lo schermo non elimina nessuna frammentazione: sostituisce solo una `memcpy` piccola con una grande. E la soglia non se ne accorge, perché **guarda solo il numero di pixel** e mai la geometria.
+
+#### Cosa succede durante uno scroll
+
+Quando si trascina una lista **non cambia solo la riga che entra**: tutte le righe si spostano, quindi ogni pixel dell'area visibile è diverso da prima. La regione danneggiata **non è lo spostamento** (per esempio 20 px), è **l'intera area visibile del widget** — anche scorrendo di un solo pixel.
+
+Per un widget a tutta larghezza si ricade quindi nel **caso A**, con questo spreco:
+
+| Altezza fascia | Byte copiando la fascia | Byte se scatta la soglia | Spreco |
+|---|---|---|---|
+| 90 righe *(soglia)* | 184 320 | 1 228 800 | **6,7×** |
+| 150 righe | 307 200 | 1 228 800 | **4,0×** |
+| 300 righe | 614 400 | 1 228 800 | **2,0×** |
+| 400 righe | 819 200 | 1 228 800 | **1,5×** |
+| 600 righe | 1 228 800 | 1 228 800 | nessuno |
+
+**Lo spreco è massimo appena sopra la soglia** e si riduce man mano che la fascia cresce: il caso peggiore è un widget di media altezza, non uno a schermo pieno.
+
+#### Il grafico 2D di questa applicazione ricade nel caso B
+
+**Verificato:** il grafico è centrale, con campi ai lati. **Non occupa tutta la larghezza**, quindi durante il pan si prende il percorso a righe e la soglia un senso ce l'ha.
+
+Resta però il dubbio che 15 % sia troppo bassa anche qui. Con un'area di grafico attorno ai **700 × 450** px:
+
+| | Byte | Chiamate | Tempo stimato @ 1,5 GB/s |
+|---|---|---|---|
+| Copia parziale | 450 × 1 400 = **630 000** | 450 | ~420 µs + ~9 µs di overhead |
+| Copia integrale *(scatta la soglia)* | **1 228 800** | 1 | ~820 µs |
+
+Il costo fisso di una `memcpy` è nell'ordine delle **decine di nanosecondi**: 450 chiamate valgono ~9 µs, contro i ~400 µs in più di copia. **La copia parziale resta circa il doppio più veloce**, e soprattutto muove la metà dei byte attraverso la L2 condivisa — che per il jitter è ciò che conta.
+
+Il punto di pareggio reale sembra quindi molto più in alto del 15 %, plausibilmente fra il 50 e il 70 %.
+
+> ⚠️ Queste sono **stime**, basate su un'ipotesi di banda `memcpy` e su una dimensione del grafico non misurata. Servono a mostrare che la soglia va rivista, non a decidere il valore: quello lo dà il contatore qui sotto.
+
+#### Come trovare il valore giusto
+
+Non a ragionamento — con un contatore nei due rami:
+
+```cpp
+static unsigned s_full = 0, s_partial = 0;
+
+if (stalePx >= thresholdPx)  { ++s_full;    copyRectFromSource(...tutto...); }
+else                         { ++s_partial; copyRectFromSource(...zona...); }
+
+if (((s_full + s_partial) % 100) == 0)
+    fprintf(stderr, "[AI-MEM] full=%u partial=%u maxStalePx=%d\n",
+            s_full, s_partial, s_maxStalePx);
+```
+
+Poi si scorre il grafico 2D e si guarda il rapporto. Se vince sistematicamente `full`, ci sono due correzioni, e conviene applicarle entrambe.
+
+**1. Escludere il caso a tutta larghezza.** Lì il presupposto della soglia non vale: la regione è già contigua e già nel percorso veloce.
+
+```cpp
+const bool fullWidth = (stale.left == 0 && stale.right == m_width - 1);
+if (!fullWidth && stalePx >= thresholdPx)
+    copyRectFromSource(... tutto ...);
+else
+    copyRectFromSource(... zona ...);
+```
+
+**2. Alzare la soglia** per il caso parziale, dal 15 % a un valore vicino al punto di pareggio reale — da determinare con la misura, plausibilmente fra 50 e 70 %.
+
+Le due correzioni sono indipendenti: la prima riguarda liste e widget a tutta larghezza, la seconda il grafico 2D e ogni altro riquadro centrale.
+
+### 7.3 Gli altri interventi
+
+1. **Eliminare le 3 copie ridondanti nel percorso 3D** — ognuna vale 1,2 MB, cioè quanto l'intero passaggio da SDL a DRM.
+
+2. **Togliere `Posiziona` dal percorso di disegno** della pagina Manual Sequence: misurato a **832 µs di CPU, il 49,8 %** del costo di un ridisegno, per un'operazione che non disegna.
+
+3. **Prova causale definitiva** — programma `stress_mem` (già scritto, in `tracing_Imx8plus/stress_mem/`): genera traffico di memoria controllato su CPU0-2 **senza alcuna GUI**, in tre modalità che separano *banda* da *sfratto della cache*. Se riproduce il jitter, la catena causale è chiusa in modo incontrovertibile.
+
+4. **Blitter 2D hardware (G2D)** — intervento strutturale: porta i pixel in DRAM via DMA senza passare dalle cache dei core.
 
 **Vie da non riprovare**, ciascuna con la misura che le esclude: partizionamento della cache (impossibile su A53), `nohz_full` (guadagno limitato e non è il meccanismo), PM QoS (testato, nessun effetto), riduzione ulteriore della quota cgroup (migliora la media, non il massimo), forzatura della frequenza (già a `performance`), raffreddamento (45 °C di margine).
 

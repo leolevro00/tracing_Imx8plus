@@ -13,7 +13,7 @@
 > 🥇 Miglior singola sessione: martellando il **3D viewer** con la stessa configurazione, **0 sforamenti** su 77 000 attivazioni, max 100 µs (durata ~5 min, da confermare con una sessione lunga).
 > 🔴 **Hotspot residuo individuato (non risolto)**: pagina **"Manual Sequence"** — max **135 µs**, il più alto dai test SDL. Causa nel codice: `DrawDisView` **ricalcola la geometria della piega dentro la routine di disegno** (`Sim2DView.cpp:326-347`). **Misurato** (tempo di CPU): un draw costa **1 142 µs medi / 2 248 µs max** su un ciclo RT di 4 ms, di cui **`Posiziona` ~50%** (832 µs) — e non disegna nulla. Documentato come **lavoro futuro n.1**; non toccato perché governa la sequenza reale di piegatura → [→ Manual Sequence](#test-finale-merged-scroll-calculation-2026-07-30).
 > 🔬 **Conclusione trasversale (formulazione prudente)**: l'efficacia del throttling cgroup **dipende dallo scenario** — nello *scroll grafico* migliorava il massimo (99→71 µs, campagna 2026-07-20), su *Manual Sequence / 3D* no (max invariato 113-135 µs), perché lì il costo sta in **singole operazioni** da 1-2 ms di CPU che non si possono accorciare. La **banda DDR è stata esclusa come causa** con un controllo sperimentale: i picchi a 10 ms sono quasi identici a riposo (7,8 %) e sotto carico (9,1 %), quindi non discriminano tra le due condizioni; sotto carico cambia solo la *frequenza* delle raffiche. Candidato ora più plausibile: **inquinamento delle cache** da parte di un draw che tocca >1 MB di pixel in 1,1 ms, più lock/page fault. Direzione con maggiore probabilità di successo: **ridurre il lavoro per disegno**, non regolare lo scheduler.
-> Ultimo aggiornamento: **2026-07-30** (🏆 **CONFRONTO PRINCIPALE — SDL vs DRM diretto, a parità di codice** (stesso branch, cambiato solo il define `EMBEDDED_HMI_RT_DRM_DIRECT`): sforamenti >100 µs **215/M (SDL) → 4,7/M (DRM)**, cioè **−98%, fattore ~46×**; **caso peggiore 158 → 113 µs (−45 µs)**. È l'**unico** intervento del lavoro che ha abbassato il *picco massimo* e non solo la frequenza. Uno sforamento ogni ~18 s con SDL, uno ogni ~14 min con DRM. 🥇 **Confermato sotto il carico più pesante** (martellamento **3D viewer**, 63 k attivazioni per parte, confronto diretto senza normalizzazione): sforamenti >100 µs **33 → 4** (−88%), max **180 → 106 µs** (−41%). Il **3D viewer è il carico peggiore rimasto**: 63,5 sforamenti/M contro 4,7/M dell'uso normale, anche su DRM. 🔬 **Meccanismo ora verificato nel codice — quattro fattori**: SDL fa **2 copie** di pixel invece di 1, ridisegna **tutto lo schermo** ad ogni present (`SDL_RenderCopy(..., nullptr, nullptr)`), **si blocca sul vsync** (`SDL_RENDERER_PRESENTVSYNC` + `SDL_RenderSetVSync(1)`), e subisce una **conversione RGB565→ARGB8888 nascosta** ad ogni upload che raddoppia i byte scritti (RGB565 non è nativo su GLES2/i.MX8MP, vedi TEST 5); il DRM è invece **RGB565 nativo end-to-end** (`DRM_FORMAT_RGB565`), copia solo la regione sporca e il page flip è asincrono. È la varianza e la banda di memoria, non il carico medio, a generare il jitter — il **TEST 5b** lo dimostra: GUI +150% ma RT 191 µs, cioè prestazioni grafiche e determinismo RT sono **assi indipendenti**. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔍 **3D viewer**: causa individuata e **ipotesi "contesa GPU" RETTIFICATA** — `libPegGL.so` è un'implementazione **software** di OpenGL ES (rasterizzatore + JIT ARM, nessuna libreria GPU linkata), quindi la GPU **non è coinvolta né nell'interfaccia né nel 3D**: nella configurazione DRM è praticamente inutilizzata. Il 3D viewer è il carico peggiore perché fa rasterizzazione 3D **software sulla CPU** e, ad ogni frame, **rialloca** il bitmap nativo (`PegGL/egl.cpp:891-894`) — allocazione dinamica di un buffer grande nel percorso di disegno, ostile al RT. ✅ **FIX APPLICATO**: rimossa quella riallocazione (`PegGL/egl.cpp`) — la logica di riuso del buffer **esisteva già** in `renderToNative`, ma il chiamante la disattivava azzerando `pStart`. Il buffer da ~960 KB superava la soglia mmap di glibc, quindi ogni frame comportava `munmap` (→ TLB shootdown con IPI verso il core RT) più ~240 page fault. ⚖️ **Validazione INCONCLUSIVA**: post-fix 70 k att., max **102 µs** (era 106) e sforamenti >100 µs **42,9/M** (erano 63,5/M) — ma il totale eventi >60 µs è **2,2× più alto**, segno che in quella sessione il 3D ha disegnato molti più frame (martellamento manuale = carico non riproducibile), e 3 eventi contro 4 sono statisticamente indistinguibili. Servirebbero carico automatizzato e ≥40 min per sessione. Il fix resta giustificato a prescindere: rimuove un'operazione non deterministica dal percorso di disegno e ripristina il comportamento previsto da `renderToNative`. → [→ 3D viewer](#3d-viewer-gpu-2026-07-30). 📊 **test sul branch merged, due sessioni**: senza throttling 1 589 000 att. ≈ 1 h 46 min (max 113 µs, 8 spike >100 µs) e **con throttling ~15%** 848 000 att. ≈ 57 min (max 113 µs, 4 spike >100 µs). **Confronto valido con la sezione S** a parità di throttling: fasce 60–70/71–80/81–90 µs **−75%/−55%/−51%**, sforamenti >100 µs **−38%**, ma **caso peggiore invariato** (113 vs 109 µs) e fascia 91–99 µs peggiorata — le ottimizzazioni riducono la *frequenza*, non il *picco massimo*. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). ❌ **Ottimizzazione collisioni scartata con misura**: `check_collisioni_pezzo` costa in media **4 µs**/frame → cacharlo è inutile. 📐 **Nota metodologica**: gli sforamenti >100 µs avvengono in media **uno ogni ~13 min**, quindi sotto la mezz'ora un test che non li rileva **non dimostra nulla**. Spike correlati al martellamento dello scroll della pagina **"Calculation"** (`PAG_OTTIM_SIM2D`, `CSim2DView`), che **ha già** il throttling `DrawPanIfDue` — il margine residuo è il ricalcolo collisioni per frame. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔀 **merge finale**: branch `experiment/test-6-ch0-defer-plus-pan-scroll` = defer CH0 (IMP/MAN) + ottimizzazione pan/scroll, senza conflitti; l'estensione CORR/AUTO/SAUTO resta fuori perché il guadagno non è dimostrato. Il merge ha toccato solo 8 file (`cad2d/`+`sim2d/`): le modifiche `liste/` erano già nel baseline, quindi rischio regressione Die/Program List basso. Vedi [→ sezione T](#merge-ch0-defer-pan-scroll-2026-07-30). ✅ **defer CH0 validato funzionalmente**: con programma numerico, restando sulla pagina numerica, il defer si innesca dalla 2ª pressione e il batching coalesce davvero il lavoro pesante — prima volta osservato empiricamente; debug rimosso da tutti i file, resta da fare la misura RT pulita. 🔑 scoperta decisiva: i test venivano fatti dalla **pagina CAD 2D del pezzo** (`PAG_CAD2D_PEZZO`=27), non dalla pagina numerica → premere Piece Set è un no-op scartato da `CambiaPagina`, premere Manual costa **due cambi pagina completi** 27→0→27; il jitter osservato viene dalla macchina dei cambi pagina, non da `SettaControlli`/`GetEntry`. Mappatura icone toolbar confermata: documento=F1/IMP, mano=F2/MAN, chiave=F3/SAUTO, fabbrica=F4/AUTO. Vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29). Nota precedente: toggle Zoom↔Normale — ripremere lo stesso tasto già attivo alterna deliberatamente tra due istanze pagina (`CPpgView`/`CPpgViewZoom`), quindi lo stato di defer per-istanza non può sopravvivere; guard `m_bCH0Completing` resta comunque in codice come fix valido; da rivalidare alternando stati diversi nel test; debug rimosso da entrambi i repo; vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29); + test cgroup ~15% uso comune/scroll Die Set, vedi [→ sezione S](#test-cgroup15-uso-comune-scroll-dieset-2026-07-29))
+> Ultimo aggiornamento: **2026-07-30** (🏆 **CONFRONTO PRINCIPALE — SDL vs DRM diretto, a parità di codice** (stesso branch, cambiato solo il define `EMBEDDED_HMI_RT_DRM_DIRECT`): sforamenti >100 µs **215/M (SDL) → 4,7/M (DRM)**, cioè **−98%, fattore ~46×**; **caso peggiore 158 → 113 µs (−45 µs)**. È l'**unico** intervento del lavoro che ha abbassato il *picco massimo* e non solo la frequenza. Uno sforamento ogni ~18 s con SDL, uno ogni ~14 min con DRM. 🥇 **Confermato sotto il carico più pesante** (martellamento **3D viewer**, 63 k attivazioni per parte, confronto diretto senza normalizzazione): sforamenti >100 µs **33 → 4** (−88%), max **180 → 106 µs** (−41%). Il **3D viewer è il carico peggiore rimasto**: 63,5 sforamenti/M contro 4,7/M dell'uso normale, anche su DRM. 🔬 **Meccanismo ora verificato nel codice — quattro fattori**: SDL fa **2 copie** di pixel invece di 1, ridisegna **tutto lo schermo** ad ogni present (`SDL_RenderCopy(..., nullptr, nullptr)`), **si blocca sul vsync** (`SDL_RENDERER_PRESENTVSYNC` + `SDL_RenderSetVSync(1)`), e subisce una **conversione RGB565→ARGB8888 nascosta** ad ogni upload che raddoppia i byte scritti (RGB565 non è nativo su GLES2/i.MX8MP, vedi TEST 5); il DRM è invece **RGB565 nativo end-to-end** (`DRM_FORMAT_RGB565`), sostituisce la GPU con una `memcpy`. ⚠️ **Rettifica 2026-09-16:** le affermazioni *«copia solo la regione sporca»* e *«il page flip è asincrono»* sono risultate **entrambe false** — `flushPresent` esegue comunque uno **snapshot integrale ad ogni present** (più un catch-up a frame intero nel 42,5% dei blit) e `pageFlip()` **attende l'evento in `select()`**: l'attesa si è spostata, non eliminata. Vedi [sezione W](#costo-copie-drm-2026-09-16). È la varianza e la banda di memoria, non il carico medio, a generare il jitter — il **TEST 5b** lo dimostra: GUI +150% ma RT 191 µs, cioè prestazioni grafiche e determinismo RT sono **assi indipendenti**. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔍 **3D viewer**: causa individuata e **ipotesi "contesa GPU" RETTIFICATA** — `libPegGL.so` è un'implementazione **software** di OpenGL ES (rasterizzatore + JIT ARM, nessuna libreria GPU linkata), quindi la GPU **non è coinvolta né nell'interfaccia né nel 3D**: nella configurazione DRM è praticamente inutilizzata. Il 3D viewer è il carico peggiore perché fa rasterizzazione 3D **software sulla CPU** e, ad ogni frame, **rialloca** il bitmap nativo (`PegGL/egl.cpp:891-894`) — allocazione dinamica di un buffer grande nel percorso di disegno, ostile al RT. ✅ **FIX APPLICATO**: rimossa quella riallocazione (`PegGL/egl.cpp`) — la logica di riuso del buffer **esisteva già** in `renderToNative`, ma il chiamante la disattivava azzerando `pStart`. Il buffer da ~960 KB superava la soglia mmap di glibc, quindi ogni frame comportava `munmap` (→ TLB shootdown con IPI verso il core RT) più ~240 page fault. ⚖️ **Validazione INCONCLUSIVA**: post-fix 70 k att., max **102 µs** (era 106) e sforamenti >100 µs **42,9/M** (erano 63,5/M) — ma il totale eventi >60 µs è **2,2× più alto**, segno che in quella sessione il 3D ha disegnato molti più frame (martellamento manuale = carico non riproducibile), e 3 eventi contro 4 sono statisticamente indistinguibili. Servirebbero carico automatizzato e ≥40 min per sessione. Il fix resta giustificato a prescindere: rimuove un'operazione non deterministica dal percorso di disegno e ripristina il comportamento previsto da `renderToNative`. → [→ 3D viewer](#3d-viewer-gpu-2026-07-30). 📊 **test sul branch merged, due sessioni**: senza throttling 1 589 000 att. ≈ 1 h 46 min (max 113 µs, 8 spike >100 µs) e **con throttling ~15%** 848 000 att. ≈ 57 min (max 113 µs, 4 spike >100 µs). **Confronto valido con la sezione S** a parità di throttling: fasce 60–70/71–80/81–90 µs **−75%/−55%/−51%**, sforamenti >100 µs **−38%**, ma **caso peggiore invariato** (113 vs 109 µs) e fascia 91–99 µs peggiorata — le ottimizzazioni riducono la *frequenza*, non il *picco massimo*. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). ❌ **Ottimizzazione collisioni scartata con misura**: `check_collisioni_pezzo` costa in media **4 µs**/frame → cacharlo è inutile. 📐 **Nota metodologica**: gli sforamenti >100 µs avvengono in media **uno ogni ~13 min**, quindi sotto la mezz'ora un test che non li rileva **non dimostra nulla**. Spike correlati al martellamento dello scroll della pagina **"Calculation"** (`PAG_OTTIM_SIM2D`, `CSim2DView`), che **ha già** il throttling `DrawPanIfDue` — il margine residuo è il ricalcolo collisioni per frame. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔀 **merge finale**: branch `experiment/test-6-ch0-defer-plus-pan-scroll` = defer CH0 (IMP/MAN) + ottimizzazione pan/scroll, senza conflitti; l'estensione CORR/AUTO/SAUTO resta fuori perché il guadagno non è dimostrato. Il merge ha toccato solo 8 file (`cad2d/`+`sim2d/`): le modifiche `liste/` erano già nel baseline, quindi rischio regressione Die/Program List basso. Vedi [→ sezione T](#merge-ch0-defer-pan-scroll-2026-07-30). ✅ **defer CH0 validato funzionalmente**: con programma numerico, restando sulla pagina numerica, il defer si innesca dalla 2ª pressione e il batching coalesce davvero il lavoro pesante — prima volta osservato empiricamente; debug rimosso da tutti i file, resta da fare la misura RT pulita. 🔑 scoperta decisiva: i test venivano fatti dalla **pagina CAD 2D del pezzo** (`PAG_CAD2D_PEZZO`=27), non dalla pagina numerica → premere Piece Set è un no-op scartato da `CambiaPagina`, premere Manual costa **due cambi pagina completi** 27→0→27; il jitter osservato viene dalla macchina dei cambi pagina, non da `SettaControlli`/`GetEntry`. Mappatura icone toolbar confermata: documento=F1/IMP, mano=F2/MAN, chiave=F3/SAUTO, fabbrica=F4/AUTO. Vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29). Nota precedente: toggle Zoom↔Normale — ripremere lo stesso tasto già attivo alterna deliberatamente tra due istanze pagina (`CPpgView`/`CPpgViewZoom`), quindi lo stato di defer per-istanza non può sopravvivere; guard `m_bCH0Completing` resta comunque in codice come fix valido; da rivalidare alternando stati diversi nel test; debug rimosso da entrambi i repo; vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29); + test cgroup ~15% uso comune/scroll Die Set, vedi [→ sezione S](#test-cgroup15-uso-comune-scroll-dieset-2026-07-29))
 > Aggiornamento precedente: **2026-07-28** (branch `experiment/test-6-deferred-ch0-feedback`, pressbrakepeg: defer 500 ms Editor/Manual → max **88 µs**, 0 spike su 137k att.; vedi [→ sezione P](#editor-manual-defer-2026-07-28))
 > Aggiornamento precedente: **2026-07-27** (campagna 4× su `test-6-font-pan-scroll-opt`; confronto UI `test-6-with-new-font` + cgroup `2000 20000` → max **83 µs**, 0 spill)
 ---
@@ -42,7 +42,7 @@
 | 🏆 [**TEST FINALE DI TIROCINIO** — obiettivo raggiunto](#test-finale-tirocinio) | **In questo file** — 1 451 000 attivazioni (~1 h 37 min), **massimo 98 µs**, **zero sopra i 100 µs**. Configurazione completa, distribuzione della coda, progressione 158 → 113 → 103 → 98 µs, PMU della peggiore iterazione e analisi del throttling |
 | 🏁 [**IPOTESI FINALE** — interferenza sulla L2 condivisa](#ipotesi-finale) | **In questo file** — **sezione conclusiva (rettificata 31/07)**: la prova a istruzioni costanti, le due trappole metodologiche (`bus_cycles`, CPI), il fatto che `isolcpus` non isola la cache, **l'aritmetica 1024×600 / L2 e il conto 30/250 che predice il +8 % misurato**, l'esperimento `stress_mem` e il piano d'azione riordinato |
 | ⚠️ [**Meccanismo del jitter — indagine PMU (non risolto)**](#meccanismo-jitter-risolto-2026-07-30) | **In questo file** — `PerfMonitor` riattivato (`RTCHndlr.cpp` + `Lnk/main.cpp`, warm-up `PERF_WARMUP_ITER`); ipotesi "contesa di latenza" formulata su 2 worst case e **ritirata** dopo analisi su 10 000 iterazioni; cosa resta accertato e cosa no; include la nota metodologica sul rischio dei campioni piccoli |
-| ⭐ [**SDL vs DRM diretto: confronto architetturale**](#sdl-vs-drm-architettura) | **In questo file** — **sezione di riferimento**: le due pipeline passo per passo con riferimenti al codice, conteggio buffer/copie, i **quattro fattori** che spiegano i risultati (copie, schermo intero vs regione sporca, vsync bloccante vs page flip asincrono, conversione RGB565→ARGB8888 nascosta), terminologia (display controller vs GPU vs dumb buffer), principio **determinismo ≠ throughput**, sequenza Test 5 → 5b → 6, risultati misurati e cosa resta non verificato |
+| ⭐ [**SDL vs DRM diretto: confronto architetturale**](#sdl-vs-drm-architettura) | **In questo file** — **sezione di riferimento**: le due pipeline passo per passo con riferimenti al codice, conteggio buffer/copie, i **quattro fattori** che spiegano i risultati (copie, schermo intero vs regione sporca, vsync bloccante vs page flip — ⚠️ attesa **spostata, non eliminata**, rettifica 2026-09-16, conversione RGB565→ARGB8888 nascosta), terminologia (display controller vs GPU vs dumb buffer), principio **determinismo ≠ throughput**, sequenza Test 5 → 5b → 6, risultati misurati e cosa resta non verificato |
 | [Merge finale: defer CH0 + pan/scroll](#merge-ch0-defer-pan-scroll-2026-07-30) | **In questo file** — branch `experiment/test-6-ch0-defer-plus-pan-scroll`, contenuto e rischi del merge |
 | [Test finale + scroll "Calculation" + SDL vs DRM (misure)](#test-finale-merged-scroll-calculation-2026-07-30) | **In questo file** — misure sul branch merged, confronto **SDL vs DRM** (uso generale e martellamento 3D), nota metodologica sulla durata minima dei test, ottimizzazione collisioni scartata con misura |
 | [3D viewer: GPU nel percorso di presentazione](#3d-viewer-gpu-2026-07-30) | **In questo file** — contesto EGL e `peglSwapBuffers` propri; carico peggiore rimasto (63,5 sforamenti/M vs 4,7/M); **lavoro futuro**, non toccato |
@@ -85,6 +85,108 @@ Stack: **PEG** disegna su framebuffer software → `uploadDirtyRegion()` → SDL
 
 ---
 
+
+---
+
+<a id="interruttori-runtime"></a>
+
+### Interruttori: variabili d'ambiente e define di build
+
+Riferimento unico di tutto ciò che cambia il comportamento **senza comparire in git**, come richiesto dalla regola *"configurazione completa del test, comprese le impostazioni a runtime"*. Aggiornato al **2026-09-17**.
+
+**Due processi distinti, variabili diverse.** È l'errore più facile da fare: `PERF_*` su `PegExec` non ha alcun effetto, e `PEG_*` su `Lnk` nemmeno.
+
+| Processo | Contiene | Prefisso |
+|---|---|---|
+| **`PegExec`** | la GUI, `libPegLib` | `PEG_*`, `PEGDRM_*` |
+| **`Lnk`** | il thread RT `COM RTC Handler`, `SqCom` → `PerfMonitor` | `PERF_*` |
+
+#### `PegExec` — percorso grafico
+
+| Variabile | Default | Effetto |
+|---|---|---|
+| `PEG_DRM_COND_SYNC` | `0` | `1` = salta lo snapshot integrale quando `needsFullSyncBeforeFlip()` dice che non serve. `0` = snapshot ad ogni present (comportamento storico) |
+| `PEG_DRM_SYNC_STATS` | **`1` (acceso)** | Riga `[AI-SYNC]` ogni 200 present (~4 s sotto carico). ⚠️ **Da mettere a `0` in ogni campagna RT**: è l'unica stampa periodica che resta accesa di default |
+| `PEG_DIRTY_DIAG` | `0` | Righe `[DIRTY-IN]` / `[DIRTY-OUT]`: quanti rettangoli entrano in `mergeDirtyRegion` fra due `processPendingUpdates`. Molto verboso, redirigere su file |
+| `PEG_DRM_FULLWIDTH_PCT` | `0` (disattivo) | `N` = allarga a larghezza piena i rettangoli larghi ≥ N% dello schermo. Pareggio misurato ~44%, quindi **50 è sensato, 25 fa danno** (vedi [sezione W §4](#costo-copie-drm-2026-09-16)) |
+| `PEG_DRM_COPYBENCH` | `0` | `1` = micro-benchmark dei due pattern di copia al primo blit, poi si spegne. Ruba ~100 ms di CPU all'avvio: **non lasciarlo attivo** |
+| `PEG_DRM_CATCHUP_STATS` | `0` | `1` = riga `[CATCHUP]` ogni 200 blit con la distribuzione dei rami del catch-up |
+| `PEG_PRESENT_INTERVAL_MS` | `16` | Intervallo minimo fra due present (~62 Hz). Freno regolabile senza ricompilare |
+| `PEGDRM_TOUCH_DEV` | auto | Forza il device evdev del touch invece della scansione di `/dev/input/event*` |
+
+Variabili di SDL lette dal codice (`SDL_VIDEODRIVER`, `SDL_VIDEO_DOUBLE_BUFFER`, `SDL_KMSDRM_REQUIRE_DRM_MASTER`): rilevanti solo sul path SDL, impostate dal codice stesso via `SDL_SetHint`.
+
+#### `Lnk` — misura real-time
+
+| Variabile | Default | Effetto |
+|---|---|---|
+| `PERF_ENABLE` | **non impostata = spento** *(dal 2026-09-17)* | `1` = misura PMU su CPU3. ⚠️ La lettura perf **altera i valori di nanosleep**: usare per correlazione worst-case/contatori, **mai per massimi assoluti** |
+| `PERF_WARMUP_ITER` | `15000` (~60 s) | Attivazioni escluse all'inizio. L'istogramma conta **tutto**, PerfMonitor no: le due popolazioni non coincidono. `0` per includere l'avvio |
+| `PERF_WORST_KEEP` | `1` | `1` = blocco classico con un solo worst. `N` (2..32) = lista compatta dei peggiori N + CSV con N righe in `/tmp/perf_rt_worst.csv` |
+
+Le ultime due hanno effetto solo con `PERF_ENABLE=1`.
+
+⚠️ **`Lnk` va terminato con `SIGTERM`, non con Ctrl+C.** `SIGINT` non è gestito: il processo muore senza il dump finale e senza i CSV. Usare `kill -TERM $(pidof Lnk)`.
+
+#### Define di build in `PegLib.pro` — richiedono ricompilazione
+
+| Define | Riga | Stato | Effetto |
+|---|---|---|---|
+| `EMBEDDED_HMI_RT_DRM_DIRECT` | 12 | attivo = DRM | Commentarlo fa ricadere sul path SDL. È l'A/B architetturale a una variabile |
+| `EMBEDDED_HMI_RT_STATS` | 9 | disattivo dal 2026-09-16 | Righe `[RT] uploadDirtyRegion` / `syncBackFromPeg` ogni secondo. **Tenere spento nelle campagne RT** |
+| `EMBEDDED_HMI_RT_DIAG` | 10 | disattivo | Diagnosi pipeline SDL, incompatibile con DRM_DIRECT |
+| `EMBEDDED_HMI_RT_NATIVE_TEXTURE` | 11 | disattivo | Test 5b, ritirato |
+
+⚠️ **Trappola di build, verificata sul campo il 2026-09-16.** Il progetto usa `test -e Makefile || qmake`: qmake non rigira da solo, e anche quando rigira **`make` non ricompila**, perché guarda le date dei sorgenti e non i flag del compilatore. Dopo ogni modifica ai `DEFINES` serve:
+
+```bash
+touch pegenstein/PegLib/peglvglwindow.cpp pegenstein/PegLib/peg_run.cpp
+```
+
+e poi verificare sul binario, **prima** di deployare:
+
+```bash
+strings libPegLib.so.1.0.0 | grep -c "uploadDirtyRegion: calls="   # 0 = RT_STATS davvero spento
+```
+
+#### Scenari pronti
+
+**Campagna RT pulita** — massimi veri, nessuna strumentazione nel percorso RT:
+
+```bash
+./Lnk                                                   # PerfMonitor spento di default
+PEG_DRM_SYNC_STATS=0 ./PegExec                          # unica stampa periodica da spegnere
+```
+
+**A/B snapshot condizionale** — stesso binario, una sola variabile:
+
+```bash
+PEG_DRM_SYNC_STATS=0 PEG_DRM_COND_SYNC=0 ./PegExec      # braccio A
+PEG_DRM_SYNC_STATS=0 PEG_DRM_COND_SYNC=1 ./PegExec      # braccio B
+```
+
+**Correlazione PMU** — contatori sui peggiori N, CSV a fine run:
+
+```bash
+PERF_ENABLE=1 PERF_WORST_KEEP=20 ./Lnk
+# terminare con:  kill -TERM $(pidof Lnk)   →  /tmp/perf_rt_worst.csv
+```
+
+**Diagnostica dirty region:**
+
+```bash
+PEG_DIRTY_DIAG=1 PEG_DRM_SYNC_STATS=0 ./PegExec 2> /tmp/dirty.log
+```
+
+**Verifica una-tantum del costo delle copie:**
+
+```bash
+PEG_DRM_COPYBENCH=1 ./PegExec 2> /tmp/bench.log
+```
+
+#### Regola pratica
+
+Ogni riga di questa tabella ha un default **uguale al comportamento storico**, così una build senza variabili si comporta come sempre. Quando si registra un test nel registro, riportare la riga di comando **completa** di entrambi i processi: è l'unico modo per poterlo rifare a distanza di mesi.
 ### Protocollo misura standard
 
 Per ogni test, due scenari sul target:
@@ -114,6 +216,8 @@ Per ogni test, due scenari sul target:
 effMBps = req_MB / (updateMs / 1000)   → throughput solo nel tempo “dentro” l’upload
 reqMBps = req_MB / durata_finestra_s    → byte al secondo di calendario (include pause tra upload)
 ```
+
+> ⚠️ **RETTIFICA (2026-09-16):** su **path DRM** `effMBps` di `uploadDirtyRegion` **non misura la velocità della copia**. Il numeratore conta i byte del solo rettangolo dirty corrente; il denominatore cronometra l'intera `blitDirtyRegion`, che esegue **fino a due copie** (catch-up del back buffer **più** rettangolo corrente) oltre all'attesa su `PegFrameBufferLock`. Misurato: 264 000 px di catch-up contro 123 000 px di dirty per blit, cioè una **sottostima di ~3,15×**. Su path SDL la metrica resta valida (`SDL_UpdateTexture` copia una volta sola i byte contati). Dettagli: [sezione W](#costo-copie-drm-2026-09-16).
 
 | Test | Macro / path | Cosa include `updateMs` | Cosa **non** include |
 |------|--------------|-------------------------|----------------------|
@@ -5962,7 +6066,7 @@ Coppia di sessioni dedicate, con lo **stesso numero di attivazioni** in entrambe
 
 Cioè il 3D viewer genera **~13 volte più sforamenti** dell'uso normale, anche sul path DRM. È quindi la **condizione peggiore rimasta** e il candidato naturale per il prossimo intervento di ottimizzazione.
 
-**Meccanismo.** L'analisi architetturale completa dei due path — pipeline passo per passo, conteggio delle copie, i quattro fattori che spiegano i numeri, terminologia e principio del determinismo — è nella **[sezione V](#sdl-vs-drm-architettura)**. In sintesi: il path SDL comporta **due copie di pixel** invece di una, ridisegna **tutto lo schermo** ad ogni present anche per un aggiornamento minimo, **si blocca in attesa del vsync** dentro il thread GUI, e subisce una **conversione RGB565→ARGB8888 nascosta**; il DRM è RGB565 nativo end-to-end, copia solo la regione sporca e il page flip è asincrono.
+**Meccanismo.** L'analisi architetturale completa dei due path — pipeline passo per passo, conteggio delle copie, i quattro fattori che spiegano i numeri, terminologia e principio del determinismo — è nella **[sezione V](#sdl-vs-drm-architettura)**. In sintesi: il path SDL comporta **due copie di pixel** invece di una, ridisegna **tutto lo schermo** ad ogni present anche per un aggiornamento minimo, **si blocca in attesa del vsync** dentro il thread GUI, e subisce una **conversione RGB565→ARGB8888 nascosta**; il DRM è RGB565 nativo end-to-end e sostituisce la GPU con una `memcpy`. ⚠️ **Rettifica 2026-09-16:** *«copia solo la regione sporca»* e *«page flip asincrono»* erano sbagliate — lo snapshot integrale c'è ad ogni present e `pageFlip()` attende in `select()`. Il confronto SDL/DRM resta valido, ma si regge sugli altri due fattori; vedi [sezione W](#costo-copie-drm-2026-09-16).
 
 Sul **3D viewer** in particolare: il sospetto della contesa GPU è documentato con riscontri nel codice (contesto EGL e `peglSwapBuffers` propri) ma **non è stato misurato** → vedi [3D viewer](#3d-viewer-gpu-2026-07-30).
 
@@ -6173,7 +6277,39 @@ che coincide con l'**obiettivo dichiarato** del lavoro ([→ Obiettivo](#obietti
 
 ## V — SDL vs DRM diretto: confronto architetturale completo
 
-Sezione di riferimento sulle differenze tra le due architetture di presentazione. Raccoglie in un unico posto pipeline, meccanismi, terminologia e risultati misurati. · [← Tabella](#stato-test) · Dati e misure: [sezione U](#test-finale-merged-scroll-calculation-2026-07-30) · Confronto con Qt: [Differenze strutturali interfacce](#differenze-strutturali-interfacce)
+Sezione di riferimento sulle differenze tra le due architetture di presentazione. Raccoglie in un unico posto la risposta quantitativa (buffer e byte), le pipeline, i meccanismi, la terminologia e i risultati misurati. · [← Tabella](#stato-test) · Dati e misure: [sezione U](#test-finale-merged-scroll-calculation-2026-07-30) · Confronto con Qt: [Differenze strutturali interfacce](#differenze-strutturali-interfacce)
+
+> **Nota sui riferimenti di riga.** I numeri nei §2 e §2-bis risalgono al 2026-07-30 e si riferiscono allo stato del file di allora. I numeri nei §3 e §4 sono stati verificati il **2026-09-16** sul working tree **con la patch `[AI-DIRTY]` applicata** (+34 righe in `peglvglwindow.cpp`); dopo la rimozione della patch andranno rivisti. **Gli ancoraggi stabili sono i nomi di funzione**, non i numeri di riga.
+
+---
+
+### 0. Risposta in breve: due confronti da non mescolare
+
+Le due domande che ricorrono su questo lavoro sono *"abbiamo ridotto i framebuffer?"* e *"abbiamo ridotto i trasferimenti di byte?"*. La risposta è **sì a entrambe**, ma va tenuto separato un secondo confronto che riguarda solo il path DRM al suo interno:
+
+| Confronto | Esito |
+|---|---|
+| **DRM contro SDL** — il cambio di architettura | Il DRM vince su entrambi i fronti, senza ambiguità: **un buffer in meno** e **metà dei byte per present** |
+| **DRM oggi contro DRM al suo minimo teorico** | Resta una **ridondanza**: lo snapshot integrale per present (vedi §5②) |
+
+La ridondanza del secondo confronto **non toglie nulla al primo**. La formulazione corretta è: il DRM è l'architettura che *può* arrivare al minimo di trasferimenti — un solo passaggio, RGB565 nativo — e la ridondanza residua è un difetto implementativo identificato e quantificato, non un limite dell'architettura.
+
+**Le due risposte in numeri (1024×600):**
+
+| | SDL | DRM | Variazione |
+|---|---:|---:|---|
+| Buffer di pixel | **4** | **3** | −1 (sparisce la texture) |
+| Memoria dei buffer | ≈ 8,2 MiB | ≈ 3,5 MiB | **−57 %** |
+| Salti che un pixel compie (bitmap → scanout) | **2** | **1** | −1 |
+| Operazioni di copia eseguite per present | 1 dirty + 1 schermo intero | 1,46 dirty + **1,62** schermo intero | DRM ne fa **di più** |
+| Byte fissi per present (read+write) | ≥ **4,69 MiB** | **3,80 MiB** | **−19 %** ⚠️ |
+| Byte totali per present (con la parte incrementale) | ≈ **5,39 MiB** | ≈ **4,48 MiB** | **−17 %** ⚠️ |
+
+⚠️ Le due righe dei byte erano **−50 %** fino al 2026-09-17: contavano una sola copia a schermo intero per il DRM, mentre sono **1,62** (snapshot + catch-up). Rettifica e conti in §4.
+
+Dettaglio e riferimenti al codice nei §3 e §4.
+
+---
 
 ### 1. Come si commuta tra i due path
 
@@ -6184,39 +6320,42 @@ DEFINES += EMBEDDED_HMI_RT_DRM_DIRECT     # attivo  -> path DRM diretto (Test 6)
 #DEFINES += EMBEDDED_HMI_RT_DRM_DIRECT    # commentato -> path SDL (Test 0)
 ```
 
-Il path SDL **non è stato rimosso**: vive negli `#else` di `peglvglwindow.cpp` (righe **978** e **1060**). Questo permette un A/B a **una sola variabile**, senza cambiare branch — ed è il motivo per cui i confronti della sezione U sono metodologicamente solidi: defer CH0, ottimizzazioni pan/scroll e tutto il resto del codice applicativo restano identici nelle due sessioni.
+Il path SDL **non è stato rimosso**: vive negli `#else` di `peglvglwindow.cpp`. Questo permette un A/B a **una sola variabile**, senza cambiare branch — ed è il motivo per cui i confronti della sezione U sono metodologicamente solidi: defer CH0, ottimizzazioni pan/scroll e tutto il resto del codice applicativo restano identici nelle due sessioni.
+
+---
 
 ### 2. Le due pipeline, passo per passo
 
 **Path SDL** — `pegenstein/PegLib/peglvglwindow.cpp`
 
-| # | Passo | Riferimento | Natura |
+| # | Passo | Riferimento (2026-07-30) | Natura |
 |---|-------|-------------|--------|
-| 1 | PegLib/LVGL disegna in `m_framebuffer` (bitmap software) | — | CPU |
+| 1 | PegLib disegna in `m_framebuffer` (bitmap software) | — | CPU |
 | 2 | `SDL_UpdateTexture(m_texture, &rect, src, pitch)` | riga **1062** | **copia** bitmap → texture (creata `SDL_TEXTUREACCESS_STREAMING`, riga **492**) |
 | 3 | `SDL_RenderClear` + `SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr)` | riga **671** | **la GPU** rasterizza la texture nel backbuffer |
 | 4 | `SDL_RenderPresent(m_renderer)` | riga **672** | flip backbuffer↔frontbuffer, **con attesa vsync** |
 
 **Path DRM diretto** — `pegenstein/PegLib/pegdrmoutput.cpp`
 
-| # | Passo | Riferimento | Natura |
+| # | Passo | Riferimento (2026-07-30) | Natura |
 |---|-------|-------------|--------|
-| 1 | PegLib/LVGL disegna in `m_framebuffer` — **identico**, questa parte non cambia | — | CPU |
+| 1 | PegLib disegna in `m_framebuffer` — **identico**, questa parte non cambia | — | CPU |
 | 2 | `blitDirtyRegion` → `memcpy` in `m_buffers[m_backIndex]` | righe **525**, **629** | **copia** della sola **regione sporca** |
-| 3 | `drmModePageFlip(m_fd, m_crtcId, nextFb, DRM_MODE_PAGE_FLIP_EVENT, this)` | riga **691** | flip **asincrono**, ritorna subito |
+| 3 | `syncBackFromPeg` → snapshot integrale pre-flip | riga **650** (in `flushPresent`) | **copia** a pieno schermo (vedi §5②) |
+| 4 | `drmModePageFlip(m_fd, m_crtcId, nextFb, DRM_MODE_PAGE_FLIP_EVENT, this)` | riga **691** | richiesta di flip, **non copia pixel** |
 
 ### 2-bis. Sequenza completa di chiamate: cosa accade trascinando un grafico 2D
 
 Tracciata sul path DRM, dal touch al pixel sullo schermo. Utile per capire dove agiscono i freni e dove si spende il tempo.
 
-| Fase | Passo | Riferimento |
+| Fase | Passo | Riferimento (2026-07-30) |
 |------|-------|-------------|
 | **Input** | `processEvents()` interroga il touch via evdev: `m_drmEvdev->poll(&drmEvdevTouchThunk, this)` | `peglvglwindow.cpp:705-710` |
 | | `drmEvdevTouchThunk` → `handleDrmEvdevTouch(fbX, fbY, action)` | `:1261`, `:1270` |
 | | → `emitMouseEvent(...)`: inietta l'evento nella coda messaggi PEG | `:1275` (down), `:1284` (motion) |
 | **Dispatch** | PegLib consegna il messaggio al widget con la cattura del puntatore | — |
 | | `CSim2DView::Message()`: `PM_LBUTTONDOWN` / `PM_POINTER_MOVE` / `PM_LBUTTONUP` | `Sim2DView.cpp:130` / `:167` / `:142` |
-| **Pan** | `OnMouseMove()`: calcola lo spostamento, aggiorna `m_ptTo`, `m_bPanRedrawPending = TRUE`, chiama `DrawPanIfDue(FALSE)` | `Sim2DView.cpp` (dopo `DrawPanIfDue`) |
+| **Pan** | `OnMouseMove()`: calcola lo spostamento, aggiorna `m_ptTo`, `m_bPanRedrawPending = TRUE`, chiama `DrawPanIfDue(FALSE)` | `Sim2DView.cpp` |
 | | **🚦 Freno 1** — `DrawPanIfDue()`: se < **33 ms** dall'ultimo redraw **ritorna**; altrimenti `Invalidate()` + `Draw()` | `Sim2DView.cpp:1563` (costante) |
 | **Disegno** | `Draw()` → `BeginDraw()` … `EndDraw()` | `Sim2DView.cpp:181` |
 | | `DrawDisView()`: fondo (`DisegnaVideo`, `:238`), poi Sup/Punz/Inf/Mat (`:305-308`), Riscontro/Pezzo (`:318-319`), `DrawCollisioni` (`:324`) | `Sim2DView.cpp:225` |
@@ -6224,61 +6363,134 @@ Tracciata sul path DRM, dal touch al pixel sullo schermo. Utile per capire dove 
 | | `EndDraw()` → PegLib registra la regione sporca | — |
 | **→ DRM** | `processPendingUpdates()` legge il rettangolo sporco | `peglvglwindow.cpp:585-613` |
 | | → `uploadDirtyRegion(...)` | `:608` (impl. `:971`) |
-| | → sotto `PegFrameBufferLock`: `blitDirtyRegion(...)` = `memcpy` riga per riga nel back buffer (2 byte/px) | `:1033`; `pegdrmoutput.cpp:525,629` |
+| | → sotto `PegFrameBufferLock`: `blitDirtyRegion(...)` = `memcpy` nel back buffer (2 byte/px) | `:1033`; `pegdrmoutput.cpp:525,629` |
 | | `m_pendingPresent = true` | `:609` |
 | **Present** | main loop → `flushPresent(false)` | `peg_run.cpp:1515` |
 | | **🚦 Freno 2** — se < `rtPresentIntervalMs()` dall'ultimo present **ritorna** | `peglvglwindow.cpp:628` |
 | | svuota la coda dirty fino a 8 volte (evita frame incompleti in scroll) | `:636-643` |
 | | **`syncBackFromPeg(...)`**: snapshot **completo** del framebuffer PEG nel back buffer | `:650` |
-| | `pageFlip()` → `drmModePageFlip(..., DRM_MODE_PAGE_FLIP_EVENT, ...)` — **asincrono** | `:653`; `pegdrmoutput.cpp:691` |
+| | `pageFlip()` → `drmModePageFlip(..., DRM_MODE_PAGE_FLIP_EVENT, ...)`, poi **attende l'evento in `select()`** | `:653`; `pegdrmoutput.cpp:691`, `:699-719` |
 | | al vblank il display controller inizia a scandire il nuovo buffer | — |
 
 **Due osservazioni pratiche che emergono dalla sequenza:**
 
-1. **Esistono due freni indipendenti**: uno sul **disegno** (`DrawPanIfDue`, 33 ms dopo la modifica del 2026-07-30) e uno sul **present** (`flushPresent` / `rtPresentIntervalMs()`). Agiscono su stadi diversi della catena e vanno considerati separatamente.
-2. Il freno sul present è **regolabile a runtime** tramite la variabile d'ambiente **`PEG_PRESENT_INTERVAL_MS`** (vedi commento a `peglvglwindow.cpp:39`), quindi si possono provare cadenze di presentazione diverse **senza ricompilare** — utile per campagne di misura rapide sul target.
+1. **Esistono due freni indipendenti**: uno sul **disegno** (`DrawPanIfDue`, 33 ms) e uno sul **present** (`flushPresent` / `rtPresentIntervalMs()`). Agiscono su stadi diversi della catena e vanno considerati separatamente.
+2. Il freno sul present è **regolabile a runtime** tramite la variabile d'ambiente **`PEG_PRESENT_INTERVAL_MS`**, quindi si possono provare cadenze di presentazione diverse **senza ricompilare** — utile per campagne di misura rapide sul target.
 
-### 3. Buffer e copie: chiarimento sul conteggio
+---
 
-Un fraintendimento facile è contare "5 buffer con SDL contro 3 con DRM". In realtà:
+<a id="buffer-test-6-utilizza-meno-buffer-del-test-0"></a>
 
-- **`render` non è un buffer**, è l'operazione GPU che *produce* il backbuffer
-- **frontbuffer e backbuffer non sono due copie**: sono la stessa coppia di superfici che si alternano, e il flip **non copia nulla** — cambia solo quale delle due il display controller legge
-- **anche il DRM è double buffered**: alloca `m_buffers[0]` e `m_buffers[1]` (riga **284**)
+### 3. Buffer: quanti sono, e quale è sparito
 
-Quindi il vantaggio **non** è "meno buffer", è **meno copie di pixel**:
+> Questa sottosezione risponde al rimando presente nel **TEST 0** ("Dettaglio conteggio buffer e confronto con il Test 6"), che fino al 2026-09-16 puntava a un'ancora **mai definita**.
 
-| | Copie reali di pixel | Flip |
+**Conteggio a 1024×600.** Un buffer è qui inteso come *una superficie di memoria che contiene pixel*.
+
+| Superficie | SDL | DRM |
 |---|---|---|
-| **SDL** | **2** — bitmap→texture (CPU/driver), texture→backbuffer (GPU) | sì, + attesa vsync |
-| **DRM** | **1** — bitmap→dumb buffer (`memcpy`) | sì, asincrono |
+| `g_pyBitmap` / `m_framebuffer` — dove PEG disegna | ✅ RGB565, ≈ 1,17 MiB | ✅ RGB565, ≈ 1,17 MiB |
+| **Texture SDL** (`SDL_TEXTUREACCESS_STREAMING`) | ✅ **ARGB8888, ≈ 2,34 MiB** | ❌ **eliminata** |
+| Scanout — coppia alternata | ✅ 2 × ARGB8888 = ≈ 4,69 MiB | ✅ 2 dumb buffer RGB565 = ≈ 2,34 MiB |
+| **Totale superfici** | **4** | **3** |
+| **Totale memoria** | **≈ 8,2 MiB** | **≈ 3,5 MiB** (−57 %) |
 
-### 4. Le quattro differenze che spiegano i risultati
+**Il buffer eliminato è la texture SDL.** Era la tappa intermedia: i pixel ci si fermavano dentro prima di raggiungere lo scanout. È lo stesso fatto che, visto dal lato dei trasferimenti, produce "2 copie invece di 1" (§4).
 
-**① Due copie di pixel contro una.** Vedi tabella sopra. Il flip, in entrambi i casi, non sposta dati.
+**Tre precisazioni necessarie per difendere questa tabella:**
+
+1. **Il double buffering non è sparito.** Anche il DRM alloca due buffer di scanout: `m_buffers[0]` e `m_buffers[1]` (`pegdrmoutput.cpp:284`, `createBuffer` con `createReq.bpp = 16` a `:314`). L'obiezione "ma allora sono sempre due buffer di scanout" è corretta, e non è quello il punto.
+2. **La memoria cala più del conteggio**, perché i buffer rimasti sono RGB565 (2 B/px) invece di ARGB8888 (4 B/px). Anche a parità di numero di superfici ci sarebbe stato un guadagno.
+3. **Il flip non è un buffer e non copia nulla.** `render` non è una superficie, è l'operazione GPU che *produce* il backbuffer; front e back buffer non sono due copie ma due superfici che si alternano, e il flip cambia solo quale delle due il display controller legge.
+
+> **Punto non determinabile dal repo.** Il numero esatto di superfici GBM allocate da SDL/Mesa non è leggibile dal codice applicativo. Il valore **2** si fonda su `SDL_VIDEO_DOUBLE_BUFFER = 1` (documentato nel [TEST 5](#test-5) come "double buffering scanout, non triple"). Se in qualche configurazione SDL allocasse una terza superficie, il vantaggio del DRM risulterebbe **maggiore**, non minore.
+
+---
+
+### 4. Trasferimenti di byte per present
+
+**Copie di pixel** — quanti salti fa un pixel da `g_pyBitmap` allo scanout:
+
+| | Copie | Quali |
+|---|---:|---|
+| **SDL** | **2** | `SDL_UpdateTexture` (CPU → texture) + `SDL_RenderCopy` (GPU: texture → backbuffer) |
+| **DRM** | **1** | `memcpy` (RAM → dumb buffer) |
+
+**Volume, a 1024×600.** `D` = pixel della regione sporca. Un frame intero vale 614 400 px → **1,17 MiB** in RGB565, **2,34 MiB** in ARGB8888.
+
+**Path SDL, per present:**
+
+| Operazione | Legge | Scrive |
+|---|---|---|
+| `SDL_UpdateTexture(&rect, …)` — solo regione sporca | D × 2 B (RGB565 da RAM) | **D × 4 B** (ARGB8888 — conversione nascosta) |
+| `SDL_RenderClear` | — | fino a 2,34 MiB (ottimizzabile dal driver) |
+| `SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr)` | **2,34 MiB** (texture intera) | **2,34 MiB** (backbuffer intero) |
+| `SDL_RenderPresent` | 0 | 0 — ma **attende il vsync** |
+| **Fisso per present, esclusa la dirty** | | **≥ 4,69 MiB** |
+
+**Path DRM, per present:**
+
+| Operazione | Legge | Scrive |
+|---|---|---|
+| `blitDirtyRegion(…)` — solo regione sporca | D × 2 B | D × 2 B |
+| `blitDirtyRegion(…)` — **catch-up**, frame intero nel 42,5% dei blit | **0,73 MiB** | **0,73 MiB** |
+| `syncBackFromPeg(…)` — snapshot integrale | **1,17 MiB** | **1,17 MiB** |
+| `drmModePageFlip(…)` | 0 | 0 |
+| **Fisso per present, esclusa la dirty** | | **3,80 MiB** |
+
+⇒ **4,69 → 3,80 MiB per present: circa il 19% in meno.**
+
+> ⚠️ **RETTIFICA (2026-09-17):** questa riga diceva *«4,69 → 2,34 MiB per present: esattamente la metà»*. Era sbagliata. La tabella DRM qui sopra fu scritta **prima** della misura dei rami del catch-up ([sezione W §5](#costo-copie-drm-2026-09-16)) e contava **una sola** copia a schermo intero per present: ne servono **1,62** (1,00 di snapshot + 0,62 di catch-up). Includendo anche la parte incrementale (~123 000 px per blit, 1,46 blit/present) i totali reali sono **SDL ≈ 5,39 MiB** contro **DRM ≈ 4,48 MiB** per present: **~17% in meno, non il 50%**. Il vantaggio del DRM sul volume è quindi molto più modesto di quanto scritto qui, e la spiegazione del guadagno RT si sposta sugli altri fattori — con l'avvertenza del §11 che il loro peso relativo **non è mai stato decomposto**.
+
+Restano valide le **due cause** che spingono nella direzione giusta, anche se il catch-up ne mangia una parte:
+
+1. **Una copia in meno** — senza la texture, il salto `texture → backbuffer` non esiste più.
+2. **Metà dei byte per pixel** — RGB565 (2 B/px) invece di ARGB8888 (4 B/px). Il path SDL chiede `SDL_PIXELFORMAT_RGB565` ma su i.MX8MP con renderer `opengles2` il formato nativo è ARGB8888 (diagnosi del [TEST 5](#test-5)), quindi SDL converte a ogni upload. Il DRM è RGB565 end-to-end: `createReq.bpp = 16` (`pegdrmoutput.cpp:314`), `DRM_FORMAT_RGB565` nel `drmModeAddFB2` (`:364`), blit con `left * 2` (`:512`), e `initialize()` rifiuta qualunque bpp ≠ 16 (`:448-450`).
+
+Anche sulla parte incrementale il DRM scrive metà dei byte: `D × 2` invece di `D × 4`.
+
+> **Punto non determinabile dal repo.** Se il driver GPU ottimizzi il `RenderClear` (fast clear) non è verificabile dal codice applicativo: per questo il totale SDL è indicato con "≥". Il `RenderCopy`, invece, legge e scrive comunque l'intera superficie a 4 B/px — quello è inerente all'operazione richiesta.
+
+**Natura delle copie.** `copyRectFromSource` (`pegdrmoutput.cpp:485-517`) esegue una **singola `memcpy` contigua** solo se `left == 0 && rectW == m_width && srcPitch == dstPitch`; altrimenti fa **una `memcpy` per riga**. Lo snapshot integrale ricade nel caso contiguo se il pitch del dumb buffer coincide con `fbW * 2` — condizione decisa dal driver e quindi non garantita dal repo.
+
+---
+
+### 5. Le quattro differenze che spiegano i risultati
+
+**① Due copie di pixel contro una.** Vedi §4. Il flip, in entrambi i casi, non sposta dati.
 
 **② Regione sporca sugli aggiornamenti incrementali; entrambi però fanno un'operazione a pieno schermo per present.**
 
-⚠️ **RETTIFICA (2026-07-30):** qui era scritto che il path DRM copia *solo* la regione sporca. È vero per gli aggiornamenti incrementali, **ma non per il present**: `flushPresent` esegue `syncBackFromPeg(m_framebuffer, framePitchBytes())` (`peglvglwindow.cpp:650`), cioè uno **snapshot completo** del framebuffer PEG prima di ogni page flip. Il motivo è documentato alle righe **645-646**: con il double buffering il back buffer conterrebbe solo l'ultima regione sporca e mancherebbe quanto disegnato nell'altro buffer, producendo artefatti (rettangoli bianchi / frame incompleti).
+⚠️ **RETTIFICA (2026-07-30):** qui era scritto che il path DRM copia *solo* la regione sporca. È vero per gli aggiornamenti incrementali, **ma non per il present**: `flushPresent` esegue `syncBackFromPeg(m_framebuffer, framePitchBytes())`, cioè uno **snapshot completo** del framebuffer PEG prima di ogni page flip. Il motivo è il double buffering: il back buffer contiene il frame di *due* present fa, quindi copiarci solo la regione sporca dell'ultimo lascerebbe artefatti (rettangoli bianchi / frame incompleti).
 
 Quadro corretto:
 
 | | Aggiornamento incrementale (per disegno) | Operazione per present |
 |---|---|---|
-| **SDL** | `SDL_UpdateTexture` della sola regione sporca (riga 1062) | `SDL_RenderCopy(..., nullptr, nullptr)` (riga **671**) = **blit GPU a pieno schermo** + `SDL_RenderPresent` con **attesa vsync** |
-| **DRM** | `blitDirtyRegion` = `memcpy` della sola regione sporca (`pegdrmoutput.cpp:525,629`) | `syncBackFromPeg` = **`memcpy` a pieno schermo** (riga **650**) + `drmModePageFlip` **asincrono** |
+| **SDL** | `SDL_UpdateTexture` della sola regione sporca | `SDL_RenderCopy(…, nullptr, nullptr)` = **blit GPU a pieno schermo, 4 B/px** + `SDL_RenderPresent` con **attesa vsync** |
+| **DRM** | `blitDirtyRegion` = `memcpy` della sola regione sporca | `syncBackFromPeg` = **`memcpy` a pieno schermo, 2 B/px** + `drmModePageFlip` |
 
-⇒ Entrambi fanno un'operazione a pieno frame per present. La differenza non è quindi "pieno schermo contro regione sporca", ma **la natura di quell'operazione**: un `memcpy` deterministico contro lavoro GPU (con conversione di formato) più un'attesa bloccante sul vsync. Il che rafforza, anziché indebolire, l'argomento del punto ⑥ (determinismo, non throughput) — che resta la spiegazione principale.
+⇒ Entrambi fanno un'operazione a pieno frame per present. La differenza è **duplice**: il **volume** (metà dei byte, §4) e la **natura** dell'operazione (un `memcpy` deterministico contro lavoro GPU con conversione di formato).
 
-**③ Attesa bloccante contro operazione asincrona** — probabilmente il fattore dominante per il jitter. Il renderer SDL è creato con `SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC` (righe **314-315** e **464-465**) e in più viene forzato `SDL_RenderSetVSync(renderer, 1)` (riga **323**): `SDL_RenderPresent` **si blocca fino al vsync**, cioè fino a ~16 ms di attesa dentro il thread della GUI, con la relativa pressione sullo scheduler al risveglio. `drmModePageFlip` con `DRM_MODE_PAGE_FLIP_EVENT` **registra la richiesta e ritorna immediatamente**; la conferma arriva come evento.
+📌 **Ridondanza nota, non ancora risolta (2026-09-15).** Con `PEG_DRM_COND_SYNC=0` (il default) il path DRM esegue `blitDirtyRegion` **e poi** `syncBackFromPeg`, che riscrive sopra il lavoro incrementale appena fatto. Il commento nel codice lo dichiara apertamente (`peglvglwindow.cpp`, blocco `[AI-SYNC]`): *«copiando l'intero schermo … sovrascrivendo integralmente il lavoro incrementale appena fatto»*. `needsFullSyncBeforeFlip()` (`pegdrmoutput.cpp:537-555`) esisteva per rendere condizionale lo snapshot — damage ≥ 15 % dello schermo **oppure** ≥ 6 blit dal flip precedente — ma **non scatta quasi mai**, perché la dirty region risulta gonfiata dal bounding box unico. Vedi l'indagine sulla dirty region e l'handoff del 2026-09-15.
+
+**③ Attesa bloccante contro operazione asincrona.**
+
+Il renderer SDL è creato con `SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC` e in più viene forzato `SDL_RenderSetVSync(renderer, 1)`: `SDL_RenderPresent` **si blocca fino al vsync**, cioè fino a ~16 ms di attesa dentro il thread della GUI, con la relativa pressione sullo scheduler al risveglio.
+
+⚠️ **RETTIFICA (2026-09-16):** questo punto affermava che con il DRM l'attesa bloccante *sparisce*, perché `drmModePageFlip` con `DRM_MODE_PAGE_FLIP_EVENT` registra la richiesta e ritorna subito. **La seconda metà è falsa.** È vero che la *ioctl* ritorna immediatamente, ma `PegDrmOutput::pageFlip()` **attende poi l'evento di flip in `select()` + `drmHandleEvent`** (`pegdrmoutput.cpp:699-719`). L'attesa bloccante **non è sparita: si è spostata**, dalla chiamata SDL alla nostra. La stessa rettifica è registrata nell'handoff del 2026-09-15 fra le conclusioni ritirate.
+
+Cosa resta valido di ③: il *meccanismo* dell'attesa è diverso (evento DRM esplicito contro sincronizzazione interna del renderer GL) e sotto il nostro controllo. Ma **③ non può più essere citato come "il fattore dominante"** senza una misura che lo isoli — vedi §11.
 
 **④ Conversione di formato nascosta contro RGB565 nativo end-to-end.**
 
-Il **DRM è RGB565 nativo dall'inizio alla fine**: `createReq.bpp = 16` (`pegdrmoutput.cpp:314`), `DRM_FORMAT_RGB565` nel `drmModeAddFB2` (riga **364**), blit con `left * 2` perché 2 byte/pixel (riga **512**), e `initialize()` rifiuta esplicitamente qualunque bpp ≠ 16 (righe **448-450**). Framebuffer PEG RGB565 → dumb buffer RGB565 → scanout RGB565: **zero conversioni**.
+Il **DRM è RGB565 nativo dall'inizio alla fine**: framebuffer PEG RGB565 → dumb buffer RGB565 → scanout RGB565, **zero conversioni** (riferimenti nel §4).
 
-Il **path SDL chiede RGB565 ma non lo ottiene**: a `peglvglwindow.cpp:475` viene richiesto `SDL_PIXELFORMAT_RGB565`, ma il **TEST 5** aveva diagnosticato che sull'i.MX8MP con renderer `opengles2` il formato **nativo è ARGB8888**. SDL accetta la richiesta e poi **converte internamente ad ogni `SDL_UpdateTexture`**, in un passaggio invisibile nel codice applicativo. La conversione **raddoppia i byte scritti** (2 → 4 byte/pixel): a 800×600 sono **1,83 MB per frame invece di 938 KB**.
+Il **path SDL chiede RGB565 ma non lo ottiene**: viene richiesto `SDL_PIXELFORMAT_RGB565`, ma il **TEST 5** aveva diagnosticato che sull'i.MX8MP con renderer `opengles2` il formato nativo è ARGB8888. SDL accetta la richiesta e poi **converte internamente ad ogni `SDL_UpdateTexture`**, in un passaggio invisibile nel codice applicativo. La conversione **raddoppia i byte scritti** (2 → 4 byte/pixel) e propaga il formato a 4 B/px a tutta la catena a valle — è la causa n. 2 del dimezzamento documentato al §4.
 
-### 5. Terminologia, per evitare equivoci
+---
+
+### 6. Terminologia, per evitare equivoci
 
 | Termine | Cos'è | Usato nel path SDL? | Usato nel path DRM? |
 |---------|-------|---------------------|---------------------|
@@ -6286,52 +6498,291 @@ Il **path SDL chiede RGB565 ma non lo ottiene**: a `peglvglwindow.cpp:475` viene
 | **GPU** (GC7000 su i.MX8MP) | L'acceleratore grafico: compone, scala, rasterizza, 3D | ✅ sì (rasterizza la texture) | ❌ **no** (per la presentazione) |
 | **Dumb buffer** | Memoria "stupida", non accelerata, che il display controller può scandire direttamente | — | ✅ è la destinazione del `memcpy` |
 
-Nel ramo DRM, SDL viene inizializzato con `SDL_Init(SDL_INIT_EVENTS | SDL_INIT_TIMER)` (riga **394**): il sottosistema **video non viene nemmeno avviato**, SDL serve solo per gli eventi di input. Il commento a riga **389** lo dice esplicitamente: "niente SDL video/texture/GPU".
+Nel ramo DRM, SDL viene inizializzato con `SDL_Init(SDL_INIT_EVENTS | SDL_INIT_TIMER)`: il sottosistema **video non viene nemmeno avviato**, SDL sopravvive solo come libreria di primitive (mutex, tick) e per la coda eventi. Il commento nel codice lo dice esplicitamente: "niente SDL video/texture/GPU".
 
 ✅ **E nemmeno il 3D viewer la usa** (verificato 2026-07-30): le sue chiamate `pegl*`/`gl*` sono risolte da **`libPegGL.so`**, un'implementazione **software** di OpenGL ES interna a pegenstein (rasterizzatore, clipper, virgola fissa, JIT ARM; nessuna libreria GPU linkata). Quindi nella configurazione DRM la **GPU del SoC è praticamente inutilizzata**: tutta la grafica, 2D e 3D, è rasterizzata dalla CPU → vedi [3D viewer](#3d-viewer-gpu-2026-07-30).
 
-### 6. Il principio: determinismo, non throughput
+---
 
-Il path DRM non fa necessariamente *meno lavoro di CPU*: un `memcpy` sposta byte, e in certi casi può spostarne quanti l'upload di una texture. Il vantaggio è che è lavoro **deterministico**: un `memcpy` dura quanto dura, sempre. L'invio di comandi alla GPU, l'attesa del suo completamento e la sincronizzazione col vsync introducono latenze **variabili**, che il thread real-time non può né controllare né prevedere.
+### 7. Il principio: determinismo, non throughput
+
+Il path DRM non fa necessariamente *meno lavoro di CPU*: un `memcpy` sposta byte, e in certi casi può spostarne quanti l'upload di una texture. Il vantaggio è duplice: sposta **meno byte** (§4) e lo fa in modo **deterministico** — un `memcpy` dura quanto dura, sempre. L'invio di comandi alla GPU, l'attesa del suo completamento e la sincronizzazione col vsync introducono latenze **variabili**, che il thread real-time non può né controllare né prevedere.
 
 Ed è la **varianza**, non il carico medio, a produrre il jitter misurato. È la ragione per cui questo è **l'unico intervento di tutto il lavoro che ha abbassato il caso peggiore** e non solo la frequenza degli eventi: le altre ottimizzazioni (defer CH0, pan/scroll) hanno ridotto *quante volte* si fa lavoro, questa ha reso il lavoro *prevedibile*.
 
-**La prova sperimentale del principio è il TEST 5b.** Rendendo la conversione di formato esplicita e usando il formato nativo ARGB8888 (`peglvglwindow.cpp:1049-1056`, oggi compilate fuori): **GUI +150%** ma **RT peggiorato a 191 µs** → rollback. Più veloce nel throughput grafico, peggiore nel determinismo, perché ARGB8888 raddoppia il traffico verso la memoria e la **banda DDR** è la risorsa che il thread RT si contende con la GUI. ⇒ **Prestazioni grafiche e determinismo real-time sono due assi indipendenti**, e ottimizzare il primo può peggiorare il secondo.
+**La prova sperimentale del principio è il TEST 5b.** Rendendo la conversione di formato esplicita e usando il formato nativo ARGB8888: **GUI +150 %** ma **RT peggiorato a 191 µs** → rollback. Più veloce nel throughput grafico, peggiore nel determinismo, perché ARGB8888 raddoppia il traffico verso la memoria e la **banda DDR** è la risorsa che il thread RT si contende con la GUI.
 
-### 7. La sequenza logica del lavoro
+⚠️ Attenzione a come si cita il 5b: **non** smentisce il meccanismo del traffico di memoria — anzi lo conferma (più byte → RT peggiore). Smentisce l'uso del **throughput grafico** come indicatore di bontà per l'RT. ⇒ **Prestazioni grafiche e determinismo real-time sono due assi indipendenti**, e ottimizzare il primo può peggiorare il secondo.
+
+---
+
+### 8. La sequenza logica del lavoro
 
 | Test | Cosa ha fatto | Esito |
 |------|---------------|-------|
 | **TEST 5** | Diagnosi: SDL non ha RGB565 nativo su questa piattaforma → conversione nascosta ad ogni upload | ✅ diagnosi, nessun fix |
-| **TEST 5b** | Tentativo "ovvio": rendere la conversione esplicita + formato nativo | ❌ GUI +150% ma **RT 191 µs** → rollback. Dimostra che l'asse ottimizzato era quello sbagliato |
-| **TEST 6** | Cambio di strada: **eliminare il bisogno di convertire** e rimuovere la GPU dal percorso di presentazione | ✅ sforamenti −98%, caso peggiore 158 → 106 µs |
+| **TEST 5b** | Tentativo "ovvio": rendere la conversione esplicita + formato nativo | ❌ GUI +150 % ma **RT 191 µs** → rollback. Dimostra che l'asse ottimizzato era quello sbagliato |
+| **TEST 6** | Cambio di strada: **eliminare il bisogno di convertire** e rimuovere la GPU dal percorso di presentazione | ✅ sforamenti −98 %, caso peggiore 158 → 106 µs |
 
 Il 5b non è un fallimento da nascondere: è il test che **giustifica** la scelta del 6. Senza quel tentativo andato male non ci sarebbe la prova che l'approccio "rendiamo la conversione più efficiente" era la strada sbagliata.
 
-### 8. Risultati misurati (sintesi)
+---
+
+### 9. Risultati misurati (sintesi)
 
 Dettagli e caveat in [sezione U](#test-finale-merged-scroll-calculation-2026-07-30).
 
 | Confronto | SDL | DRM diretto | Guadagno |
 |-----------|-----|-------------|----------|
-| Uso generale — sforamenti > 100 µs | 215 /M | **4,7 /M** | **−98% (~46×)** |
+| Uso generale — sforamenti > 100 µs | 215 /M | **4,7 /M** | **−98 % (~46×)** |
 | Uso generale — caso peggiore | 158 µs | **113 µs** | **−45 µs** |
 | Uso generale — frequenza sforamenti | 1 ogni ~18 s | **1 ogni ~14 min** | ~46× |
-| Martellamento 3D viewer — sforamenti > 100 µs (63 k att. per parte) | 33 | **4** | **−88%** |
-| Martellamento 3D viewer — caso peggiore | 180 µs | **106 µs** | **−74 µs (−41%)** |
+| Martellamento 3D viewer — sforamenti > 100 µs (63 k att. per parte) | 33 | **4** | **−88 %** |
+| Martellamento 3D viewer — caso peggiore | 180 µs | **106 µs** | **−74 µs (−41 %)** |
 | Distribuzione 60–90 µs | — | — | 8–13× meglio su ogni fascia |
 
 Il miglioramento è **coerente su tutte le fasce**, il che esclude un artefatto di misura o un singolo outlier.
 
-### 9. Corollario operativo
+---
 
-> Su questa architettura il jitter RT è governato da **CPU e banda di memoria**, non dalla GPU. Tutta la grafica — 2D e 3D — è rasterizzata in software: nella configurazione DRM la GPU del SoC è praticamente **inutilizzata**. Il guadagno del Test 6 è venuto dall'aver eliminato dal percorso di presentazione l'unico consumatore di GPU esistente (il renderer SDL, con la sua conversione di formato, il blit a schermo intero e l'attesa vsync), sostituendolo con un `memcpy` della sola regione sporca. Ne segue che ogni futura ottimizzazione va cercata sul fronte **CPU / banda / determinismo delle allocazioni**, non sull'accelerazione grafica.
+### 10. Corollario operativo
 
-### 10. Cosa resta NON verificato
+> Su questa architettura il jitter RT è governato da **CPU e banda di memoria**, non dalla GPU. Tutta la grafica — 2D e 3D — è rasterizzata in software: nella configurazione DRM la GPU del SoC è praticamente **inutilizzata**. Il guadagno del Test 6 è venuto dall'aver eliminato dal percorso di presentazione l'unico consumatore di GPU esistente (il renderer SDL, con la sua conversione di formato e il blit a schermo intero a 4 B/px), sostituendolo con un `memcpy` RGB565. Ne segue che ogni futura ottimizzazione va cercata sul fronte **CPU / banda / determinismo delle allocazioni**, non sull'accelerazione grafica.
 
-- **Contesa GPU come meccanismo del jitter del 3D viewer**: il sospetto è documentato con riscontri nel codice (contesto EGL proprio, `peglSwapBuffers` indipendente — vedi [3D viewer](#3d-viewer-gpu-2026-07-30)), ma **non è stato misurato**. Servirebbe una sessione dedicata 3D aperto vs chiuso, a parità di throttling e durata ≥30 min.
-- **Peso relativo dei quattro fattori** ① ② ③ ④: sappiamo che insieme producono il risultato, non quanto contribuisca ciascuno. Isolarli richiederebbe build intermedie (es. DRM ma con vsync bloccante, oppure SDL con `RenderCopy` limitato alla regione sporca).
+---
+
+### 11. Cosa resta NON verificato
+
+- **Peso relativo dei quattro fattori** ① ② ③ ④: sappiamo che insieme producono il risultato, **non quanto contribuisca ciascuno**. Isolarli richiederebbe build intermedie (es. DRM ma con attesa vsync bloccante in stile SDL, oppure SDL con `RenderCopy` limitato alla regione sporca). ⚠️ Dopo la rettifica di ③ (2026-09-16) questa lacuna pesa di più: non essendo più sostenibile che il DRM elimini l'attesa bloccante, **la quota del guadagno attribuibile al volume di byte contro quella attribuibile al determinismo resta non decomposta**. Il dimezzamento dei byte (§4) è dimostrato; che sia *la causa* del calo di jitter non lo è.
+- **Contesa GPU come meccanismo del jitter del 3D viewer**: il sospetto è documentato con riscontri nel codice, ma **non è stato misurato**. Servirebbe una sessione dedicata 3D aperto vs chiuso, a parità di throttling e durata ≥ 30 min.
 - **Se nella sessione SDL fosse attivo lo stesso throttling cgroup** della sessione DRM. In caso negativo l'SDL sarebbe stato misurato in condizioni più favorevoli, e il vantaggio del DRM risulterebbe **ancora maggiore**.
+- **Numero di superfici GBM allocate da SDL** (§3): fondato su `SDL_VIDEO_DOUBLE_BUFFER = 1`, non su ispezione diretta.
+- **Ottimizzazione del `RenderClear` da parte del driver GPU** (§4): non determinabile dal repo, per questo il totale SDL è un limite inferiore.
+
+---
+
+<a id="costo-copie-drm-2026-09-16"></a>
+
+## W — Costo reale delle copie nel path DRM (2026-09-16)
+
+Indagine nata da una domanda semplice: *"il DRM sposta meno byte, ed è per questo che il jitter è sceso?"*. Quattro misure in sequenza. **Due hanno smentito l'ipotesi da cui erano partite**, e una ha invalidato una metrica usata in tutto il registro. · [← Tabella](#stato-test) · Architettura: [sezione V](#sdl-vs-drm-architettura)
+
+> **Nota sui riferimenti di riga.** I numeri si riferiscono al working tree del 2026-09-16 con la strumentazione `[AI-DIRTY]`, `[AI-BENCH]`, `[AI-CATCHUP]` applicata. Ancoraggi stabili: i nomi di funzione.
+
+---
+
+### 1. ⚠️ RETTIFICA: `effMBps` di `blitDirtyRegion` è una metrica rotta
+
+**Questa è la rettifica più importante della sezione, perché tocca numeri sparsi in tutto il registro.**
+
+`effMBps = req_MB / (updateMs / 1000)`. Il problema è che numeratore e denominatore non parlano della stessa cosa sul path DRM:
+
+- **Il numeratore** conta i byte del **solo rettangolo dirty corrente** (`rtBytes = rect.w * rect.h * bytesPerPixel()`, in `uploadDirtyRegion`)
+- **Il denominatore** cronometra l'intera chiamata a `blitDirtyRegion`, che esegue **fino a due copie**: il catch-up del back buffer **più** il rettangolo corrente — oltre all'attesa su `PegFrameBufferLock`
+
+Misurato il 2026-09-16 (vedi §5): per ogni blit il catch-up copia in media **264 000 px** e il rettangolo corrente **123 000 px**. Il cronometro copre quindi 387 000 px mentre il contatore ne dichiara 123 000: **una sottostima di ~3,15×**.
+
+⇒ I ~433 MB/s che `effMBps` riporta per `blitDirtyRegion` **non sono la velocità di una copia**. Il valore corretto, ricostruito, sta oltre i 1300 MB/s.
+
+**Conseguenza per il resto del registro:** ogni conclusione tratta da `effMBps` **sul path DRM** va riletta. Su path SDL la metrica resta valida (`SDL_UpdateTexture` fa una copia sola dei byte contati). `effMBps` di `syncBackFromPeg`, introdotto oggi, è invece corretto per costruzione: una copia, esattamente dei byte contati.
+
+---
+
+### 2. Misura 1 — i pitch coincidono, la fast path è raggiungibile
+
+**Ipotesi:** `copyRectFromSource` usa una singola `memcpy` contigua solo se `left == 0 && rectW == m_width && srcPitch == dstPitch`. Se i pitch non coincidessero, nemmeno `syncBackFromPeg` prenderebbe quella strada e ogni copia integrale sarebbe già oggi una `memcpy` per riga.
+
+**Configurazione:** target avn8mp, build DRM diretto, nessuna variabile d'ambiente. Log una-tantum al primo upload.
+
+**Risultato grezzo:**
+
+```
+[RT] drm: pitch srcPEG=2048 dstDRM=2048  fbWidth=1024 drmWidth=1024 bpp=2  memcpy unica su copia integrale: SI
+```
+
+**Verdetto: confermato.** 1024 × 2 = 2048, nessun padding dal kernel, nessun disallineamento di geometria. `syncBackFromPeg` è davvero **una sola `memcpy` da 1 228 800 byte**.
+
+---
+
+### 3. Misura 2 — `syncBackFromPeg` strumentato
+
+Aggiunto il cronometro anche allo snapshot integrale, che fino ad oggi non era misurato (lacuna già segnalata nell'handoff del 2026-09-15, §3.5).
+
+**Configurazione:** `EMBEDDED_HMI_RT_STATS` attivo, carico = apertura e trascinamento di un grafico.
+
+**Numeri grezzi** (4 finestre da ~1 s):
+
+```
+[RT] uploadDirtyRegion: calls=67 req=16.71MB updateMs=39.396 effMBps=424.1 maxRectPx=485051
+[RT] syncBackFromPeg:   calls=46 req=53.91MB syncMs=30.200   effMBps=1785.0
+[RT] uploadDirtyRegion: calls=66 req=16.82MB updateMs=36.679 effMBps=458.5 maxRectPx=485051
+[RT] syncBackFromPeg:   calls=46 req=53.91MB syncMs=30.968   effMBps=1740.7
+[RT] uploadDirtyRegion: calls=52 req=13.41MB updateMs=32.317 effMBps=415.0 maxRectPx=469224
+[RT] syncBackFromPeg:   calls=35 req=41.02MB syncMs=21.103   effMBps=1943.6
+[RT] uploadDirtyRegion: calls=9  req=4.91MB  updateMs=11.081 effMBps=442.9 maxRectPx=307664
+[RT] syncBackFromPeg:   calls=9  req=10.55MB syncMs=5.572    effMBps=1892.9
+```
+
+Controllo di consistenza: `53.91 MB / 46 calls` = **1,172 MB per snapshot** = esattamente 1024×600×2. La strumentazione è corretta al byte.
+
+**Osservazione contro-intuitiva:** nella prima finestra i 67 blit "incrementali" muovono 16,71 MB in **39,4 ms**, mentre i 46 snapshot integrali muovono 53,91 MB in **30,2 ms**. Il percorso incrementale muove 3,2× meno byte e costa 1,3× più tempo.
+
+⚠️ **Interpretazione inizialmente data e poi ritirata:** il rapporto 433 contro 1839 MB/s era stato letto come "premio della contiguità, fattore 4,2×". **È sbagliato** — vedi §1: confrontava una metrica onesta con una rotta. Il fattore reale è misurato al §4 e vale 1,4-2,2×.
+
+---
+
+### 4. Misura 3 — micro-benchmark dei due pattern di copia
+
+**Ipotesi:** la `memcpy` unica contigua è più veloce del ciclo riga per riga perché il dumb buffer è mappato **write-combined**, e lo stride interrompe l'accorpamento delle scritture ad ogni riga. Va misurato il rapporto e la **larghezza di pareggio**.
+
+**Perché un benchmark e non l'A/B:** l'A/B precedente su `PEG_DRM_FULLWIDTH_PCT` (§6) era risultato inconcludente perché il carico mosso a mano non è riproducibile. Per una domanda sul costo di una `memcpy` serve ripetizione deterministica, non la GUI.
+
+**Configurazione:** `PEG_DRM_COPYBENCH=1`, sorgente e destinazione reali, **nessun lock**, 3 giri di warm-up + 20 misurati, rettangoli centrati.
+
+**Numeri grezzi:**
+
+```
+[BENCH] schermo 1024x600  pitch src=2048 dst=2048  banda h=318  20 ripetizioni
+[BENCH] banda 1024x318 contigua       min= 224 us  med= 362 us   2774 MB/s
+[BENCH] rett.  128x318 riga per riga  min=  94 us  med= 125 us    824 MB/s  -> conviene il rettangolo
+[BENCH] rett.  256x318 riga per riga  min= 134 us  med= 199 us   1161 MB/s  -> conviene il rettangolo
+[BENCH] rett.  384x318 riga per riga  min= 153 us  med= 192 us   1524 MB/s  -> conviene il rettangolo
+[BENCH] rett.  512x318 riga per riga  min= 253 us  med= 352 us   1228 MB/s  -> conviene la banda piena
+[BENCH] rett.  656x318 riga per riga  min= 316 us  med= 456 us   1258 MB/s  -> conviene la banda piena
+[BENCH] rett.  768x318 riga per riga  min= 271 us  med= 359 us   1721 MB/s  -> conviene la banda piena
+[BENCH] rett.  896x318 riga per riga  min= 278 us  med= 363 us   1957 MB/s  -> conviene la banda piena
+[BENCH] pareggio fra 384 e 512 px di larghezza (soglia utile: 50%)
+[BENCH] schermo 1024x600 contigua     min= 543 us  med= 663 us   2157 MB/s
+```
+
+**Verdetti:**
+
+| Domanda | Risposta misurata |
+|---|---|
+| Premio della contiguità a 656 px | **2,2×** (1258 contro 2774 MB/s) — non 4,2× |
+| Premio a 896 px | **1,4×** |
+| Larghezza di pareggio | **fra 384 e 512 px**, cioè ~44% della larghezza — non 241 px (24%) come stimato |
+
+**Effetto allineamento, non previsto.** La serie non è monotona: 512 → 253 µs, **656 → 316 µs**, 768 → 271 µs. Il caso 656 è più lento di rettangoli più larghi. Il motivo è che i rettangoli sono centrati (`left = (1024-w)/2`) e **solo per 656 l'offset in byte è 368, cioè 5,75 linee di cache**: tutti gli altri cadono su multipli esatti di 64. Le righe di un rettangolo disallineato iniziano e finiscono a metà linea. I rettangoli reali hanno bordi arbitrari, quindi il numero "brutto" del 656 è il più rappresentativo — e questo gioca a favore dell'allargamento, perché `left = 0` è sempre allineato.
+
+**Calibrazione — la riga più utile.** Copia pura a schermo intero: **543 µs (min), 663 µs (med)**. In produzione `syncBackFromPeg` misura **~656 µs per chiamata**. Coincidono.
+
+⇒ **`syncBackFromPeg` in produzione non è gonfiato dalla contesa sul lock: è copia pura.** Anche questa ipotesi, formulata prima della misura, è smentita.
+
+---
+
+### 5. Misura 4 — distribuzione dei rami del catch-up
+
+**Ipotesi:** in produzione un blit costa ~809 µs, ma il benchmark dice che copiare il rettangolo sporco medio ne costa ~190-270. Mancano ~600 µs, che è quanto costa una copia a schermo intero. Sospetto: il ramo *"stale ≥ soglia"* del catch-up scatti quasi sempre, e lo schermo venga copiato **due volte per present**.
+
+**Configurazione:** `PEG_DRM_CATCHUP_STATS=1`, stesso carico (grafico aperto e trascinato), report ogni 200 blit.
+
+**Numeri grezzi** (5 finestre):
+
+```
+[CATCHUP] blit=200  fullFirst=2 fullStale=86 rectStale=59 none=53  frame interi=88 (44%)  px/blit: catchup=278686 dirty=150472
+[CATCHUP] blit=200  fullFirst=0 fullStale=81 rectStale=60 none=59  frame interi=81 (40%)  px/blit: catchup=249113 dirty=111099
+[CATCHUP] blit=200  fullFirst=0 fullStale=86 rectStale=60 none=54  frame interi=86 (43%)  px/blit: catchup=264447 dirty=116302
+[CATCHUP] blit=200  fullFirst=0 fullStale=85 rectStale=58 none=57  frame interi=85 (42%)  px/blit: catchup=261387 dirty=118099
+[CATCHUP] blit=200  fullFirst=0 fullStale=87 rectStale=54 none=59  frame interi=87 (44%)  px/blit: catchup=267493 dirty=118033
+```
+
+**Verdetto: parzialmente confermato — 42,5%, non l'80-90% che la versione forte dell'ipotesi richiedeva.**
+
+**Letture derivate:**
+
+- **Il `none` al 28% non è un buon segno, è aritmetica.** Lo stale damage viene consumato e invalidato dal **primo** blit dopo ogni flip; i blit successivi dello stesso ciclo lo trovano già consumato. Con 1,46 blit per present (67 blit su 46 present, §3), la quota di blit "primi dopo il flip" è 46/67 = **68,7%**, e i blit che fanno davvero catch-up sono 42,5 + 29 = **71,5%**. Torna.
+- Riformulato correttamente: **dei catch-up effettivi, il 59% copia tutto lo schermo** (42,5 / 71,5).
+- **Il ramo `rectStale` copia pochissimo.** Dai 264 000 px medi, la parte dei frame interi vale 0,425 × 614 400 = 261 120; restano ~2 900 px per blit che, spalmati sul 29% di `rectStale`, fanno **~10 700 px a evento**, l'1,7% dello schermo. Lo stale damage è **bimodale**: o è minuscolo, o sfonda la soglia dei 92 160 px. Niente in mezzo.
+
+---
+
+### 6. A/B su `PEG_DRM_FULLWIDTH_PCT` — inconcludente
+
+**Ipotesi:** allargare i rettangoli a larghezza piena sopra soglia fa scattare la `memcpy` unica e riduce il tempo per blit.
+
+**Configurazione:** stesso binario, `PEG_DRM_FULLWIDTH_PCT` non impostata contro `=25`, carico = apertura e trascinamento del grafico.
+
+**Numeri grezzi:**
+
+```
+OFF: 809 us per blit  (927 blit, 749.6 ms totali)
+ON : 864 us per blit  (1119 blit, 966.8 ms totali)
+```
+
+**Verdetto: INCONCLUSIVO, e il test era mal progettato.**
+
+1. **La variabilità del carico supera l'effetto cercato.** La stessa configurazione OFF, misurata mezz'ora prima nella sessione del §3, dava **616 µs per blit** (119,5 ms su 194 blit). La differenza OFF-contro-OFF fra due sessioni (616 → 809, +31%) è **più grande** della differenza OFF-contro-ON dentro la stessa sessione (809 → 864). Anche i conteggi differiscono: 927 contro 1119 blit, cioè due carichi diversi.
+2. **La soglia provata era sbagliata.** Il valore 25% era stato derivato da un pareggio stimato a 241 px, poi misurato al §4 a **384-512 px**. Con la soglia al 25% l'espansione si attivava anche sotto i 384 px, dove **fa danno**.
+
+È lo stesso fallimento metodologico già registrato per la validazione del fix sul 3D viewer: *«martellamento manuale = carico non riproducibile»*. Per domande sul costo di una `memcpy` serve un benchmark deterministico, non la GUI.
+
+---
+
+### 7. Quadro complessivo: quante copie a schermo intero per present
+
+Mettendo insieme §3 e §5, con 1,46 blit per present:
+
+```
+copie a schermo intero per present
+   catch-up          1,46 × 0,427 = 0,62
+   syncBackFromPeg                  1,00
+                                   -----
+                                    1,62
+```
+
+**Il sistema copia lo schermo intero 1,62 volte per present invece di una**, più 1,46 copie del rettangolo sporco.
+
+A 46 present/s e 2,457 MB per copia integrale (letti + scritti): **~183 MB/s di solo traffico a schermo intero**. L'handoff del 2026-09-15 (§3.1) stimava 26-117 MB/s contando **solo** lo snapshot: il valore va corretto verso l'alto.
+
+**Bilancio del tempo per blit** (tempi mediani del benchmark §4):
+
+| Voce | px | tempo stimato |
+|---|---:|---:|
+| catch-up (264 000 px, quasi tutto contiguo a 1,079 ns/px) | 264 000 | ~285 µs |
+| rettangolo sporco (123 000 px, riga per riga a 2,186 ns/px) | 123 000 | ~268 µs |
+| **totale spiegato** | | **~553 µs** |
+| **misurato in produzione** | | **809 µs** |
+| **residuo non spiegato** | | **~256 µs** |
+
+Circa due terzi del tempo di un blit sono ora spiegati da copie. Il residuo è plausibilmente l'attesa su `PegFrameBufferLock`, che il benchmark escludeva di proposito — **non verificato**.
+
+---
+
+### 8. Dove converge tutto: una causa, tre costi
+
+Il bounding box unico prodotto da `mergeDirtyRegion` (caso A, accertato il 2026-09-15) genera **tre costi distinti**:
+
+1. `needsFullSyncBeforeFlip()` trova sempre il danno sopra il 15% → **snapshot integrale ad ogni present**
+2. Lo stale damage, che è anch'esso un bounding box costruito dall'unione dei dirty del frame precedente, eredita lo stesso gonfiaggio → **il 59% dei catch-up va a frame intero**
+3. `blitDirtyRegion` copia comunque **il rettangolo gonfiato**, non i pixel realmente cambiati
+
+Da fermo il box misura ~208 608 px (34% dello schermo) contro ~11 400 px di cambiamento reale: un fattore ~18.
+
+⇒ **Sistemare `mergeDirtyRegion` tocca tutti e tre i costi.** L'espansione a larghezza piena ne tocca solo mezzo (il punto 3, e solo sul pattern di accesso), ed è per questo che l'A/B non mostrava nulla.
+
+---
+
+### 9. Rettifiche che ne derivano
+
+| Affermazione precedente | Stato | Dove |
+|---|---|---|
+| `effMBps` misura la velocità della copia dirty | ❌ **rotta sul path DRM**, sottostima ~3,15× | §1 |
+| Premio della contiguità = 4,2× | ❌ **ritirata**, vale 1,4-2,2× | §4 |
+| Pareggio dell'allargamento a 241 px (24%) | ❌ **ritirata**, misurato a 384-512 px (~44%) | §4 |
+| `syncBackFromPeg` in produzione è gonfiato dal lock | ❌ **ritirata**, è copia pura (543-663 contro 656 µs) | §4 |
+| `effMBps` = 345-460 MB/s è la banda di copia (handoff §3.6) | ❌ **da rifare**: era la metrica rotta. Le stime del §7.2 di `modifiche_progetto.md` che ne derivano vanno riviste | §1 |
+| Traffico da snapshot 26-117 MB/s (handoff §3.1) | ⚠️ **da correggere verso l'alto**: ~183 MB/s contando anche il catch-up | §7 |
+| Il catch-up copia lo schermo quasi sempre | ⚠️ **parzialmente confermata**: 42,5% dei blit, 59% dei catch-up effettivi | §5 |
+
+---
+
+### 10. Lavoro aperto
+
+- **Il residuo di ~256 µs per blit** (§7) non è attribuito. Va misurato cronometrando separatamente l'acquisizione di `PegFrameBufferLock`.
+- **Nessuna di queste misure dice nulla sul jitter RT.** Sono costi diretti nel thread GUI; il meccanismo ipotizzato per il jitter è indiretto (inquinamento della L2 pagato dal thread RT su CPU3). Serve la campagna lunga, ≥ 1 ora per configurazione.
+- **`PEG_DRM_FULLWIDTH_PCT` non è né promosso né bocciato.** Il meccanismo è reale ma piccolo, e la soglia corretta è ~50%, non 25. Da riprovare solo dopo aver sistemato il merge, se resterà un margine.
+- **La strumentazione `[AI-DIRTY]`, `[AI-BENCH]`, `[AI-CATCHUP]` va rimossa** a indagine chiusa. Commit di checkpoint sul branch `experiment/test-6-ch0-defer-corr-auto-sauto-estensione`.
 
 ---
 
