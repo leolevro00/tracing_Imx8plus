@@ -13,7 +13,7 @@
 > 🥇 Miglior singola sessione: martellando il **3D viewer** con la stessa configurazione, **0 sforamenti** su 77 000 attivazioni, max 100 µs (durata ~5 min, da confermare con una sessione lunga).
 > 🔴 **Hotspot residuo individuato (non risolto)**: pagina **"Manual Sequence"** — max **135 µs**, il più alto dai test SDL. Causa nel codice: `DrawDisView` **ricalcola la geometria della piega dentro la routine di disegno** (`Sim2DView.cpp:326-347`). **Misurato** (tempo di CPU): un draw costa **1 142 µs medi / 2 248 µs max** su un ciclo RT di 4 ms, di cui **`Posiziona` ~50%** (832 µs) — e non disegna nulla. Documentato come **lavoro futuro n.1**; non toccato perché governa la sequenza reale di piegatura → [→ Manual Sequence](#test-finale-merged-scroll-calculation-2026-07-30).
 > 🔬 **Conclusione trasversale (formulazione prudente)**: l'efficacia del throttling cgroup **dipende dallo scenario** — nello *scroll grafico* migliorava il massimo (99→71 µs, campagna 2026-07-20), su *Manual Sequence / 3D* no (max invariato 113-135 µs), perché lì il costo sta in **singole operazioni** da 1-2 ms di CPU che non si possono accorciare. La **banda DDR è stata esclusa come causa** con un controllo sperimentale: i picchi a 10 ms sono quasi identici a riposo (7,8 %) e sotto carico (9,1 %), quindi non discriminano tra le due condizioni; sotto carico cambia solo la *frequenza* delle raffiche. Candidato ora più plausibile: **inquinamento delle cache** da parte di un draw che tocca >1 MB di pixel in 1,1 ms, più lock/page fault. Direzione con maggiore probabilità di successo: **ridurre il lavoro per disegno**, non regolare lo scheduler.
-> Ultimo aggiornamento: **2026-07-30** (🏆 **CONFRONTO PRINCIPALE — SDL vs DRM diretto, a parità di codice** (stesso branch, cambiato solo il define `EMBEDDED_HMI_RT_DRM_DIRECT`): sforamenti >100 µs **215/M (SDL) → 4,7/M (DRM)**, cioè **−98%, fattore ~46×**; **caso peggiore 158 → 113 µs (−45 µs)**. È l'**unico** intervento del lavoro che ha abbassato il *picco massimo* e non solo la frequenza. Uno sforamento ogni ~18 s con SDL, uno ogni ~14 min con DRM. 🥇 **Confermato sotto il carico più pesante** (martellamento **3D viewer**, 63 k attivazioni per parte, confronto diretto senza normalizzazione): sforamenti >100 µs **33 → 4** (−88%), max **180 → 106 µs** (−41%). Il **3D viewer è il carico peggiore rimasto**: 63,5 sforamenti/M contro 4,7/M dell'uso normale, anche su DRM. 🔬 **Meccanismo ora verificato nel codice — quattro fattori**: SDL fa **2 copie** di pixel invece di 1, ridisegna **tutto lo schermo** ad ogni present (`SDL_RenderCopy(..., nullptr, nullptr)`), **si blocca sul vsync** (`SDL_RENDERER_PRESENTVSYNC` + `SDL_RenderSetVSync(1)`), e subisce una **conversione RGB565→ARGB8888 nascosta** ad ogni upload che raddoppia i byte scritti (RGB565 non è nativo su GLES2/i.MX8MP, vedi TEST 5); il DRM è invece **RGB565 nativo end-to-end** (`DRM_FORMAT_RGB565`), sostituisce la GPU con una `memcpy`. ⚠️ **Rettifica 2026-09-16:** le affermazioni *«copia solo la regione sporca»* e *«il page flip è asincrono»* sono risultate **entrambe false** — `flushPresent` esegue comunque uno **snapshot integrale ad ogni present** (più un catch-up a frame intero nel 42,5% dei blit) e `pageFlip()` **attende l'evento in `select()`**: l'attesa si è spostata, non eliminata. Vedi [sezione W](#costo-copie-drm-2026-09-16). È la varianza e la banda di memoria, non il carico medio, a generare il jitter — il **TEST 5b** lo dimostra: GUI +150% ma RT 191 µs, cioè prestazioni grafiche e determinismo RT sono **assi indipendenti**. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔍 **3D viewer**: causa individuata e **ipotesi "contesa GPU" RETTIFICATA** — `libPegGL.so` è un'implementazione **software** di OpenGL ES (rasterizzatore + JIT ARM, nessuna libreria GPU linkata), quindi la GPU **non è coinvolta né nell'interfaccia né nel 3D**: nella configurazione DRM è praticamente inutilizzata. Il 3D viewer è il carico peggiore perché fa rasterizzazione 3D **software sulla CPU** e, ad ogni frame, **rialloca** il bitmap nativo (`PegGL/egl.cpp:891-894`) — allocazione dinamica di un buffer grande nel percorso di disegno, ostile al RT. ✅ **FIX APPLICATO**: rimossa quella riallocazione (`PegGL/egl.cpp`) — la logica di riuso del buffer **esisteva già** in `renderToNative`, ma il chiamante la disattivava azzerando `pStart`. Il buffer da ~960 KB superava la soglia mmap di glibc, quindi ogni frame comportava `munmap` (→ TLB shootdown con IPI verso il core RT) più ~240 page fault. ⚖️ **Validazione INCONCLUSIVA**: post-fix 70 k att., max **102 µs** (era 106) e sforamenti >100 µs **42,9/M** (erano 63,5/M) — ma il totale eventi >60 µs è **2,2× più alto**, segno che in quella sessione il 3D ha disegnato molti più frame (martellamento manuale = carico non riproducibile), e 3 eventi contro 4 sono statisticamente indistinguibili. Servirebbero carico automatizzato e ≥40 min per sessione. Il fix resta giustificato a prescindere: rimuove un'operazione non deterministica dal percorso di disegno e ripristina il comportamento previsto da `renderToNative`. → [→ 3D viewer](#3d-viewer-gpu-2026-07-30). 📊 **test sul branch merged, due sessioni**: senza throttling 1 589 000 att. ≈ 1 h 46 min (max 113 µs, 8 spike >100 µs) e **con throttling ~15%** 848 000 att. ≈ 57 min (max 113 µs, 4 spike >100 µs). **Confronto valido con la sezione S** a parità di throttling: fasce 60–70/71–80/81–90 µs **−75%/−55%/−51%**, sforamenti >100 µs **−38%**, ma **caso peggiore invariato** (113 vs 109 µs) e fascia 91–99 µs peggiorata — le ottimizzazioni riducono la *frequenza*, non il *picco massimo*. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). ❌ **Ottimizzazione collisioni scartata con misura**: `check_collisioni_pezzo` costa in media **4 µs**/frame → cacharlo è inutile. 📐 **Nota metodologica**: gli sforamenti >100 µs avvengono in media **uno ogni ~13 min**, quindi sotto la mezz'ora un test che non li rileva **non dimostra nulla**. Spike correlati al martellamento dello scroll della pagina **"Calculation"** (`PAG_OTTIM_SIM2D`, `CSim2DView`), che **ha già** il throttling `DrawPanIfDue` — il margine residuo è il ricalcolo collisioni per frame. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔀 **merge finale**: branch `experiment/test-6-ch0-defer-plus-pan-scroll` = defer CH0 (IMP/MAN) + ottimizzazione pan/scroll, senza conflitti; l'estensione CORR/AUTO/SAUTO resta fuori perché il guadagno non è dimostrato. Il merge ha toccato solo 8 file (`cad2d/`+`sim2d/`): le modifiche `liste/` erano già nel baseline, quindi rischio regressione Die/Program List basso. Vedi [→ sezione T](#merge-ch0-defer-pan-scroll-2026-07-30). ✅ **defer CH0 validato funzionalmente**: con programma numerico, restando sulla pagina numerica, il defer si innesca dalla 2ª pressione e il batching coalesce davvero il lavoro pesante — prima volta osservato empiricamente; debug rimosso da tutti i file, resta da fare la misura RT pulita. 🔑 scoperta decisiva: i test venivano fatti dalla **pagina CAD 2D del pezzo** (`PAG_CAD2D_PEZZO`=27), non dalla pagina numerica → premere Piece Set è un no-op scartato da `CambiaPagina`, premere Manual costa **due cambi pagina completi** 27→0→27; il jitter osservato viene dalla macchina dei cambi pagina, non da `SettaControlli`/`GetEntry`. Mappatura icone toolbar confermata: documento=F1/IMP, mano=F2/MAN, chiave=F3/SAUTO, fabbrica=F4/AUTO. Vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29). Nota precedente: toggle Zoom↔Normale — ripremere lo stesso tasto già attivo alterna deliberatamente tra due istanze pagina (`CPpgView`/`CPpgViewZoom`), quindi lo stato di defer per-istanza non può sopravvivere; guard `m_bCH0Completing` resta comunque in codice come fix valido; da rivalidare alternando stati diversi nel test; debug rimosso da entrambi i repo; vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29); + test cgroup ~15% uso comune/scroll Die Set, vedi [→ sezione S](#test-cgroup15-uso-comune-scroll-dieset-2026-07-29))
+> Ultimo aggiornamento: **2026-09-18** (🏆🏆 **CONFRONTO DEFINITIVO DELLE TRE ARCHITETTURE — vedi [→ sezione X](#confronto-definitivo-2026-09-18)**: tre campagne da ~2 ore con lo **stesso identico generatore di carico automatico**, stessa durata, stessa cmdline, ~1,9 M attivazioni ciascuna (entro l'1 %). Sforamenti > 100 µs: **Qt 1 431/M · SDL 43,0/M · DRM 1,06/M**, massimi **263 → 190 → 143 µs**, cioè uno sforamento ogni **2,8 s** su Qt, **93 s** su SDL, **63 min** su DRM. Il rapporto **cresce con la severità** (Qt/DRM: 82→116→122→247→1 350×), che è la firma di un meccanismo reale e non di una differenza di carico. ⚠️ **Il valore SDL di 215/M citato più avanti in questa riga è SUPERATO**: era di luglio, con `PerfMonitor` attivo, che il 2026-09-17 è stato misurato **gonfiare il jitter**. Il valore corretto, rimisurato con lo stesso protocollo delle altre due, è **43,0/M**. 🧪 **CAUSA DIMOSTRATA (2026-09-18) — `stress_mem` eseguito, con controllo negativo**: il jitter è **riprodotto senza una riga di codice grafico**. Quattro fasi su `Lnk` **senza HMI**: **baseline** 0 eventi >60 µs su 72 000 attivazioni (max 53 µs, `p ~ 10⁻⁷` — chiude la casella mai eseguita dell'handoff §3.7); **`l2fit`** (3 core al 100 %, working set 384 KB **dentro** la L2) 4 eventi, `p ≈ 0,125`, **non significativo**; **`stream`** (8 MB) **88,3 %** dei risvegli >60 µs, max **134 µs**; **`thrash`** (8 MB, pausa 20 ms) **13,8 %**, max **134 µs identico**. ⭐ **La banda è ESCLUSA, non ridimensionata**: `l2fit` gira a **21 261 MB/s** — la più alta delle tre — e produce il danno **minore** (56/M), mentre `thrash` a **1 013 MB/s** (21× meno) ne produce **2 464× di più**: **l'ordine delle bande è l'inverso di quello del danno**. L'unica variabile che segue il danno è se il working set supera i **512 KB** della L2, e i criteri di lettura erano fissati nel sorgente **a luglio, prima dell'esecuzione**. ⇒ **§7 aggiornato: non è più un'ipotesi.** Due osservazioni nuove: la **gravità non dipende dalla banda** (stesso massimo 134 µs a 6,4× di banda — spiega perché il throttling migliorava la media e non il massimo), e **spazzare durante l'esecuzione è peggio che spazzare prima**. Vedi [→ §8](#ipotesi-finale-2026-07-30). 📊 **Qt misurato per la prima volta (2026-09-18, 2 h con `carico_gui`)**: **1 431 sforamenti/M, max 263 µs**, contro **1,06/M e 143 µs** del DRM a pari carico, pari durata e pari cmdline — **1 356×**, con i rapporti che **crescono con la severità** (82→116→123→247→1 356), che è la firma di un meccanismo reale e non di una differenza di carico. 🏆 **CONFRONTO PRINCIPALE — SDL vs DRM diretto, a parità di codice** (stesso branch, cambiato solo il define `EMBEDDED_HMI_RT_DRM_DIRECT`): sforamenti >100 µs **215/M (SDL) → 4,7/M (DRM)**, cioè **−98%, fattore ~46×**; **caso peggiore 158 → 113 µs (−45 µs)**. È l'**unico** intervento del lavoro che ha abbassato il *picco massimo* e non solo la frequenza. Uno sforamento ogni ~18 s con SDL, uno ogni ~14 min con DRM. 🥇 **Confermato sotto il carico più pesante** (martellamento **3D viewer**, 63 k attivazioni per parte, confronto diretto senza normalizzazione): sforamenti >100 µs **33 → 4** (−88%), max **180 → 106 µs** (−41%). Il **3D viewer è il carico peggiore rimasto**: 63,5 sforamenti/M contro 4,7/M dell'uso normale, anche su DRM. 🔬 **Meccanismo ora verificato nel codice — quattro fattori**: SDL fa **2 copie** di pixel invece di 1, ridisegna **tutto lo schermo** ad ogni present (`SDL_RenderCopy(..., nullptr, nullptr)`), **si blocca sul vsync** (`SDL_RENDERER_PRESENTVSYNC` + `SDL_RenderSetVSync(1)`), e subisce una **conversione RGB565→ARGB8888 nascosta** ad ogni upload che raddoppia i byte scritti (RGB565 non è nativo su GLES2/i.MX8MP, vedi TEST 5); il DRM è invece **RGB565 nativo end-to-end** (`DRM_FORMAT_RGB565`), sostituisce la GPU con una `memcpy`. ⚠️ **Rettifica 2026-09-16:** le affermazioni *«copia solo la regione sporca»* e *«il page flip è asincrono»* sono risultate **entrambe false** — `flushPresent` esegue comunque uno **snapshot integrale ad ogni present** (più un catch-up a frame intero nel 42,5% dei blit) e `pageFlip()` **attende l'evento in `select()`**: l'attesa si è spostata, non eliminata. Vedi [sezione W](#costo-copie-drm-2026-09-16). È la varianza e la banda di memoria, non il carico medio, a generare il jitter — il **TEST 5b** lo dimostra: GUI +150% ma RT 191 µs, cioè prestazioni grafiche e determinismo RT sono **assi indipendenti**. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔍 **3D viewer**: causa individuata e **ipotesi "contesa GPU" RETTIFICATA** — `libPegGL.so` è un'implementazione **software** di OpenGL ES (rasterizzatore + JIT ARM, nessuna libreria GPU linkata), quindi la GPU **non è coinvolta né nell'interfaccia né nel 3D**: nella configurazione DRM è praticamente inutilizzata. Il 3D viewer è il carico peggiore perché fa rasterizzazione 3D **software sulla CPU** e, ad ogni frame, **rialloca** il bitmap nativo (`PegGL/egl.cpp:891-894`) — allocazione dinamica di un buffer grande nel percorso di disegno, ostile al RT. ✅ **FIX APPLICATO**: rimossa quella riallocazione (`PegGL/egl.cpp`) — la logica di riuso del buffer **esisteva già** in `renderToNative`, ma il chiamante la disattivava azzerando `pStart`. Il buffer da ~960 KB superava la soglia mmap di glibc, quindi ogni frame comportava `munmap` (→ TLB shootdown con IPI verso il core RT) più ~240 page fault. ⚖️ **Validazione INCONCLUSIVA**: post-fix 70 k att., max **102 µs** (era 106) e sforamenti >100 µs **42,9/M** (erano 63,5/M) — ma il totale eventi >60 µs è **2,2× più alto**, segno che in quella sessione il 3D ha disegnato molti più frame (martellamento manuale = carico non riproducibile), e 3 eventi contro 4 sono statisticamente indistinguibili. Servirebbero carico automatizzato e ≥40 min per sessione. Il fix resta giustificato a prescindere: rimuove un'operazione non deterministica dal percorso di disegno e ripristina il comportamento previsto da `renderToNative`. → [→ 3D viewer](#3d-viewer-gpu-2026-07-30). 📊 **test sul branch merged, due sessioni**: senza throttling 1 589 000 att. ≈ 1 h 46 min (max 113 µs, 8 spike >100 µs) e **con throttling ~15%** 848 000 att. ≈ 57 min (max 113 µs, 4 spike >100 µs). **Confronto valido con la sezione S** a parità di throttling: fasce 60–70/71–80/81–90 µs **−75%/−55%/−51%**, sforamenti >100 µs **−38%**, ma **caso peggiore invariato** (113 vs 109 µs) e fascia 91–99 µs peggiorata — le ottimizzazioni riducono la *frequenza*, non il *picco massimo*. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). ❌ **Ottimizzazione collisioni scartata con misura**: `check_collisioni_pezzo` costa in media **4 µs**/frame → cacharlo è inutile. 📐 **Nota metodologica**: gli sforamenti >100 µs avvengono in media **uno ogni ~13 min**, quindi sotto la mezz'ora un test che non li rileva **non dimostra nulla**. Spike correlati al martellamento dello scroll della pagina **"Calculation"** (`PAG_OTTIM_SIM2D`, `CSim2DView`), che **ha già** il throttling `DrawPanIfDue` — il margine residuo è il ricalcolo collisioni per frame. Vedi [→ sezione U](#test-finale-merged-scroll-calculation-2026-07-30). 🔀 **merge finale**: branch `experiment/test-6-ch0-defer-plus-pan-scroll` = defer CH0 (IMP/MAN) + ottimizzazione pan/scroll, senza conflitti; l'estensione CORR/AUTO/SAUTO resta fuori perché il guadagno non è dimostrato. Il merge ha toccato solo 8 file (`cad2d/`+`sim2d/`): le modifiche `liste/` erano già nel baseline, quindi rischio regressione Die/Program List basso. Vedi [→ sezione T](#merge-ch0-defer-pan-scroll-2026-07-30). ✅ **defer CH0 validato funzionalmente**: con programma numerico, restando sulla pagina numerica, il defer si innesca dalla 2ª pressione e il batching coalesce davvero il lavoro pesante — prima volta osservato empiricamente; debug rimosso da tutti i file, resta da fare la misura RT pulita. 🔑 scoperta decisiva: i test venivano fatti dalla **pagina CAD 2D del pezzo** (`PAG_CAD2D_PEZZO`=27), non dalla pagina numerica → premere Piece Set è un no-op scartato da `CambiaPagina`, premere Manual costa **due cambi pagina completi** 27→0→27; il jitter osservato viene dalla macchina dei cambi pagina, non da `SettaControlli`/`GetEntry`. Mappatura icone toolbar confermata: documento=F1/IMP, mano=F2/MAN, chiave=F3/SAUTO, fabbrica=F4/AUTO. Vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29). Nota precedente: toggle Zoom↔Normale — ripremere lo stesso tasto già attivo alterna deliberatamente tra due istanze pagina (`CPpgView`/`CPpgViewZoom`), quindi lo stato di defer per-istanza non può sopravvivere; guard `m_bCH0Completing` resta comunque in codice come fix valido; da rivalidare alternando stati diversi nel test; debug rimosso da entrambi i repo; vedi [→ sezione R](#ch0-defer-estensione-corr-auto-sauto-2026-07-29); + test cgroup ~15% uso comune/scroll Die Set, vedi [→ sezione S](#test-cgroup15-uso-comune-scroll-dieset-2026-07-29))
 > Aggiornamento precedente: **2026-07-28** (branch `experiment/test-6-deferred-ch0-feedback`, pressbrakepeg: defer 500 ms Editor/Manual → max **88 µs**, 0 spike su 137k att.; vedi [→ sezione P](#editor-manual-defer-2026-07-28))
 > Aggiornamento precedente: **2026-07-27** (campagna 4× su `test-6-font-pan-scroll-opt`; confronto UI `test-6-with-new-font` + cgroup `2000 20000` → max **83 µs**, 0 spill)
 ---
@@ -22,6 +22,7 @@
 
 | File | Contenuto |
 |------|-----------|
+| 🏆🏆 [**CONFRONTO DEFINITIVO — Qt vs SDL vs DRM**](#confronto-definitivo-2026-09-18) | **In questo file — LA TABELLA DI RIFERIMENTO DEL LAVORO.** Tre campagne da ~2 ore, **stesso identico generatore di carico**, stessa durata, stessa cmdline, ~1,9 M attivazioni ciascuna (entro l'1 %). Sforamenti > 100 µs: **Qt 1 431/M · SDL 43,0/M · DRM 1,06/M**; massimi **263 → 190 → 143 µs**. Uno sforamento ogni **2,8 s** (Qt), **93 s** (SDL), **63 min** (DRM). Il rapporto **cresce con la severità**, che è la firma di un meccanismo reale e non di una differenza di carico |
 | `pipeline_peg_sdl_drm_rt.md` | Architettura pipeline, thread, ruolo LVGL |
 | `analisi_metriche_gui_rt.md` | Significato di `calls`, `reqMBps`, `effMBps`, `maxRectPx`; **`updateMs` per test** → [sezione dedicata](#significato-updateMs) in questo registro |
 | `interferenza_cpu_ddr_idle_vs_interazione.md` | Analisi interferenza CPU/DDR vs GPU |
@@ -5823,7 +5824,11 @@ Su DDR4 sono **briciole**: frazioni di percento della banda disponibile. Ed ecco
 | PM QoS senza effetto | Il costo non è nell'ingresso/uscita da idle |
 | +8 punti di iterazioni lente sotto carico | Predetto **12 %** dal rapporto 30/250 |
 
-**Livello di confidenza:** l'ipotesi è coerente con **tutti** i dati, ha una **predizione quantitativa verificata** (§6.2) e un **meccanismo fisico misurato** (§3). Manca ancora la prova **causale** diretta — il test `stress_mem`, che riproduce il jitter senza una sola riga di codice grafico. Finché quel test non è fatto, va presentata come l'ipotesi che sopravvive al vaglio e predice correttamente, non come un fatto dimostrato.
+**Livello di confidenza — aggiornato il 2026-09-18: ✅ CAUSA DIMOSTRATA.**
+
+L'ipotesi è coerente con **tutti** i dati, ha una **predizione quantitativa verificata** (§6.2) e un **meccanismo fisico misurato** (§3). **La prova causale diretta è stata eseguita il 2026-09-18**: `stress_mem` riproduce il jitter **senza una sola riga di codice grafico**, il controllo negativo resta piatto e la banda risulta **esclusa**. Risultati completi in §8.
+
+> ⚠️ **Testo precedente, ora superato:** *«Manca ancora la prova causale diretta — il test `stress_mem` … Finché quel test non è fatto, va presentata come l'ipotesi che sopravvive al vaglio e predice correttamente, non come un fatto dimostrato.»* Il test è stato fatto. **Non va più presentata come ipotesi.**
 
 ### 8. 🧪 L'esperimento che chiude la questione — `stress_mem`
 
@@ -5845,6 +5850,66 @@ Genera traffico di memoria controllato su CPU0-2 **senza alcuna GUI**, in tre mo
 | no | no | no | Ipotesi da rifare |
 
 Il confronto che conta è **`stream` contro `thrash`**: stesso sfratto, banda molto diversa. Se il jitter è simile, la banda è definitivamente scagionata.
+
+---
+
+#### 🏆 ESITO — eseguito il 2026-09-18
+
+Quattro fasi da 5 minuti su `Lnk` **senza HMI**, `PERF_ENABLE=1`, ~71 000 attivazioni ciascuna.
+
+| Fase | banda media | eventi > 60 µs | > 100 µs | **massimo** |
+|---|---:|---:|---:|---:|
+| **0** baseline (nessuno stress) | — | **0** su 72 000 | 0 | **53 µs** |
+| **1** `l2fit` (384 KB, **dentro** la L2) | **21 261 MB/s** | 4 → **56/M** | 0 | 72 µs |
+| **2** `stream` (8 MB, nessuna pausa) | 6 505 MB/s | 62 712 → **883 268/M (88,3 %)** | 873/M | **134 µs** |
+| **3** `thrash` (8 MB, pausa 20 ms) | **1 013 MB/s** | 9 795 → **137 958/M (13,8 %)** | 42/M | **134 µs** |
+
+**Esito della matrice: `no` / `sì` / `sì` → prima riga → sfratto della L2 condivisa.** I criteri di lettura erano scritti nell'intestazione del sorgente **a luglio, prima dell'esecuzione**: l'interpretazione non è stata scelta dopo aver visto i dati.
+
+##### Le quattro conclusioni
+
+1. **La sorgente è l'HMI.** Fase 0: **zero** eventi sopra i 60 µs su 72 000 attivazioni senza GUI. Se il tasso fosse quello del DRM con GUI (223/M) se ne attenderebbero ~16: `p ~ 10⁻⁷`. ⇒ Chiude la casella *«`Lnk` da solo»* aperta dal 2026-09-15 (handoff §3.7).
+2. **Non è il carico di CPU.** Fase 1: tre core al 100 % con working set **dentro** la cache → 4 eventi contro 0, `p ≈ 0,125`, **non significativo**.
+3. **⭐ Non è la banda — è ESCLUSA, non ridimensionata.** `l2fit` gira alla banda **più alta delle tre (21 261 MB/s)** e produce il danno **minore** (56/M); `thrash` gira alla **più bassa (1 013 MB/s, 21× meno)** e produce **2 464× più eventi**. **L'ordine delle bande è l'inverso di quello del danno.**
+4. **È lo sfratto della L2 condivisa.** L'unica variabile che segue il danno è se il working set supera i **512 KB** della cache.
+
+##### Due osservazioni nuove
+
+- **La gravità non dipende dalla banda.** `stream` e `thrash` raggiungono **lo stesso massimo, 134 µs**, con un fattore 6,4 di banda fra loro. La banda governa *quante volte* capita, non *quanto costa*. ⇒ Spiega finalmente perché **il throttling cgroup migliorava la media ma non il massimo**: il massimo è il costo di *una* spazzata, e una spazzata costa uguale a qualunque banda.
+- **Spazzare *durante* l'esecuzione è peggio che spazzare prima.** `stream` (nessuna pausa) ha il picco della distribuzione in **81-90 µs**; `thrash` (pausa 20 ms) ce l'ha in **60-70 µs** con quasi nulla sopra. Senza pausa la cache viene azzerata anche *mentre* il thread RT gira; con la pausa il thread paga solo le miss iniziali.
+
+##### 🏆 La curva dose-risposta e la doppia dissociazione (2026-09-18)
+
+Modalità `stream`, 3 thread, nessuna pausa: **cambia solo la dimensione del buffer**. Working set totale = `2 buffer × 3 thread × dimensione`.
+
+| configurazione | working set | banda | eventi > 60 µs |
+|---|---:|---:|---:|
+| `64k` (= `l2fit`) | **384 KB** — *sotto* la L2 | ~21 GB/s | **0** |
+| `96k` | **576 KB** — *sopra* la L2 | **~20 GB/s** | **87,5 %** |
+| `8M` | 48 MB | 6,5 GB/s | 88,3 % |
+
+**È una funzione a gradino, non una rampa**, e cade a cavallo dei **512 KB della L2**: da 384 a 576 KB (fattore **1,5**) si passa da zero a saturazione; da 576 KB a 48 MB (fattore **83**) non cambia nulla.
+
+**La doppia dissociazione:**
+
+1. **Banda costante (~20 GB/s), sfratto variabile** → danno **0 % → 87,5 %**
+2. **Sfratto costante (entrambi oltre soglia), banda variabile di 3×** → danno **invariato**
+
+⇒ Le due variabili sono **separabili**, e solo lo sfratto conta. È la forma più forte di isolamento causale, e il confronto `64k`/`96k` è **più pulito** di `l2fit`/`thrash`, dove le bande differivano.
+
+⇒ **Lo sfratto è binario**: superata la soglia, aggiungere traffico non peggiora. Conferma diretta di §6.1, e spiega **perché `COND_SYNC=1` (−41-51 % di byte) non aveva cambiato nulla** — la GUI era già ampiamente oltre soglia.
+
+⇒ Corollario per il §9: gli interventi che riducono i **byte per present** non possono funzionare finché ogni present resta sopra soglia. La leva sono le **spazzate al secondo**.
+
+📌 **Implicazione da sviluppare:** il danno scatta quando lo stressor occupa `512 KB − (working set del thread RT)`, quindi **la posizione esatta del ginocchio misura quanta L2 serve al thread real-time**. Prove da fare: `stream 80k 3 0` (480 KB, 94 % della L2) e `stream 88k 3 0` (528 KB, 103 %).
+
+##### Il numero che si valida da solo
+
+I **21 261 MB/s** di `l2fit` sono **3,3× la banda che `stream` ha raggiunto andando davvero in DRAM** (6 505 MB/s). La DRAM non può fornire quella velocità: è la prova, **interna all'esperimento e senza ricorrere ai datasheet**, che `l2fit` lavorava effettivamente dentro la cache — cioè che il controllo negativo ha fatto ciò per cui era progettato.
+
+##### Il 143 µs non richiede più un secondo meccanismo
+
+`stream` e `thrash` hanno prodotto **134 µs** di pura interferenza di memoria, e `stream` **62 eventi sopra i 100 µs in cinque minuti**. L'evento da **143 µs** osservato il 2026-09-17 sul path DRM non ha quindi bisogno dell'ipotesi *tick / callback RCU* per essere spiegato: esiste una causa sufficiente e misurata. L'ipotesi non è smentita, ma **non è più necessaria** — e l'A/B su `nohz_full=3 rcu_nocbs=3` ha ora **esito atteso nullo**.
 
 **Curva dose-risposta** (opzionale, ma vale molto in tesi): ripetere `stream` con buffer 1, 2, 4, 8, 16 MB. Un **ginocchio** quando il buffer supera la dimensione della L2 è la firma inconfondibile del cache thrashing, e non la spiega nessun'altra ipotesi.
 
@@ -6558,6 +6623,114 @@ Il miglioramento è **coerente su tutte le fasce**, il che esclude un artefatto 
 - **Se nella sessione SDL fosse attivo lo stesso throttling cgroup** della sessione DRM. In caso negativo l'SDL sarebbe stato misurato in condizioni più favorevoli, e il vantaggio del DRM risulterebbe **ancora maggiore**.
 - **Numero di superfici GBM allocate da SDL** (§3): fondato su `SDL_VIDEO_DOUBLE_BUFFER = 1`, non su ispezione diretta.
 - **Ottimizzazione del `RenderClear` da parte del driver GPU** (§4): non determinabile dal repo, per questo il totale SDL è un limite inferiore.
+
+---
+
+<a id="confronto-definitivo-2026-09-18"></a>
+
+## 🏆🏆 X — CONFRONTO DEFINITIVO: Qt vs SDL vs DRM (2026-09-18)
+
+> **È la tabella di riferimento del lavoro.** Tutti i confronti precedenti fra architetture erano affetti da almeno uno di questi difetti: carico manuale non riproducibile, durata insufficiente, strumentazione attiva, o dato ereditato da sessioni diverse. Questo non ne ha nessuno.
+
+### Perché questo confronto è definitivo e i precedenti no
+
+| Requisito | Come è soddisfatto |
+|---|---|
+| **Stesso carico** | Un unico programma automatico che ripete **le stesse identiche azioni** (pulsanti, scrolling, grafico 3D) in ciclo per 2 ore. **Lo stesso per tutte e tre le architetture** — confermato |
+| **Durata sufficiente** | ~**1,9 milioni di attivazioni** per architettura (~2 h 07 min). Gli sforamenti > 100 µs valgono ~1/M: sotto l'ora un test non ne rileva abbastanza |
+| **Campioni confrontabili** | 1 895 000 · 1 907 000 · 1 889 000 → **entro l'1 %**. I conteggi si leggono quasi direttamente |
+| **Nessuna strumentazione** | `PerfMonitor` spento, `EMBEDDED_HMI_RT_STATS` commentato. ⚠️ Entrambi **gonfiano il jitter** (misurato il 2026-09-17) |
+| **Stessa configurazione di sistema** | Stessa cmdline del kernel per tutte e tre — nessuna riavviata con `nohz_full`/`rcu_nocbs` |
+
+⚠️ **Nota sul controllo di validità.** Il criterio abituale — *«se le fasce sotto i 100 µs coincidono fra i bracci, il carico era equivalente»* — **non è applicabile qui**, perché è proprio l'architettura a gonfiare tutte le fasce. L'equivalenza del carico si regge sul fatto che **il generatore è identico**, non su un riscontro nei dati.
+
+### Conteggi reali
+
+| Fascia | **Qt** (1 895 000 att.) | **SDL** (1 907 000 att.) | **DRM** (1 889 000 att.) |
+|---|---:|---:|---:|
+| 60-70 µs | 24 257 | 2 371 | **295** |
+| 71-80 µs | 8 953 | 564 | **77** |
+| 81-90 µs | 5 032 | 207 | **41** |
+| 91-99 µs | 1 731 | 91 | **7** |
+| **> 100 µs** | **2 712** | **82** | **2** |
+| totale > 60 µs | 42 685 | 3 315 | **422** |
+| **massimo** | **263 µs** | **190 µs** | **143 µs** |
+| minimo | 11 µs | 11 µs | 11 µs |
+
+### Normalizzato per milione di risvegli
+
+| | > 60 µs /M | **> 100 µs /M** | massimo | uno sforamento ogni |
+|---|---:|---:|---:|---:|
+| **Qt** | 22 525 | **1 431** | **263 µs** | **2,8 secondi** |
+| **SDL** | 1 738 | **43,0** | **190 µs** | **93 secondi** |
+| **DRM** | **223** | **1,06** | **143 µs** | **63 minuti** |
+
+**Qt → SDL → DRM: 1 431 → 43,0 → 1,06 sforamenti per milione.** Due salti da oltre un ordine di grandezza ciascuno, con il massimo che scende in modo monotono: **263 → 190 → 143 µs**.
+
+| rapporto | > 100 µs |
+|---|---:|
+| Qt / DRM | **1 350×** |
+| SDL / DRM | **40,6×** |
+| Qt / SDL | **33,3×** |
+
+### 🔑 Il dato più forte è la forma, non il fattore
+
+Rapporto fra le fasce, dalla meno grave alla più grave:
+
+| Fascia | Qt / DRM | Qt / SDL | SDL / DRM |
+|---|---:|---:|---:|
+| 60-70 µs | 82× | 10,2× | 8,0× |
+| 71-80 µs | 116× | 15,9× | 7,3× |
+| 81-90 µs | 122× | 24,3× | 5,0× |
+| 91-99 µs | 247× | 19,0× | 12,9× |
+| **> 100 µs** | **1 350×** | **33,1×** | **40,6×** |
+
+**Il rapporto cresce con la severità.** È l'argomento che chiude l'obiezione *«forse il carico era diverso»*: se la differenza venisse dal carico, **tutte le fasce scalerebbero dello stesso fattore**. Non lo fanno — più l'evento è grave, più il divario si allarga. È la firma attesa se il meccanismo è reale.
+
+### ✅ Il carico era attivo fino alla fine in tutte e tre
+
+Massimo sulle ultime attivazioni, controllo contro il rischio di misurare un'interfaccia ferma:
+
+| | ultime N attivazioni | massimo |
+|---|---:|---:|
+| Qt | 5 000 | 73 µs |
+| SDL | 7 000 | 63 µs |
+| DRM | 9 000 | 33 µs |
+
+### ⚠️ Questo dato SOSTITUISCE il valore SDL di luglio
+
+Il registro riportava **215/M** per SDL (riga 16, campagne di luglio). Il valore corretto è **43,0/M**, cinque volte migliore.
+
+**Non è cambiato il codice SDL:** a luglio `PerfMonitor` era attivo, e il 2026-09-17 è stato misurato che **gonfia il jitter** (SDL: massimo 156 → 111 µs togliendolo, sforamenti > 100 da 5 a 1). Il valore storico era quindi sovrastimato, come tutti i massimi assoluti raccolti prima di quella data.
+
+⇒ Nelle presentazioni va usato **43,0/M**, citando che è una rimisura con lo stesso protocollo delle altre due e non un dato ereditato.
+
+### Tracciabilità
+
+Da completare con i riferimenti esatti, come richiesto dalla regola *«configurazione completa del test, comprese le impostazioni a runtime»*:
+
+    generatore di carico : ________________  (stesso per le tre campagne)
+    durata impostata     : ________________
+    plugin QPA (solo Qt) : ________________
+    branch / commit      : ________________
+
+Interruttori attivi in tutte e tre: `PerfMonitor` **spento** (`PERF_ENABLE` non impostata), `EMBEDDED_HMI_RT_STATS` **commentato**, `PEG_PRESENT_INTERVAL_MS` al default (**16 ms** → periodo reale 20 ms per via del `Sleep(10)` del loop → **~50 present/s**), cmdline del kernel **senza** `nohz_full`/`rcu_nocbs`.
+
+📌 **Solo sul braccio DRM:** `PEG_DRM_COND_SYNC=1` (snapshot integrale condizionale). È un interruttore che **esiste solo nel path DRM** — è dentro `EMBEDDED_HMI_RT_DRM_DIRECT` — quindi non altera la confrontabilità con Qt e SDL, che non ce l'hanno.
+
+⇒ Il suo effetto sul jitter è comunque **misurato nullo** (A/B dedicato: massimo 109 contro 108 µs). Il motivo è ora quantificato: anche quando lo snapshot viene saltato, il traffico per present scende da **2,25 MiB a 1,08 MiB**, cioè da 4,5× a **2,1× la capienza della L2** — si resta **sopra soglia**, e sopra soglia lo sfratto è totale in entrambi i casi.
+
+### Perché esce questo risultato
+
+Il **meccanismo** è nella [sezione V](#sdl-vs-drm-architettura) (le pipeline passo per passo, i quattro fattori) e nella [sezione W](#costo-copie-drm-2026-09-16) (costo reale delle copie). La **causa fisica** è dimostrata nella [sezione 8 dell'ipotesi finale](#ipotesi-finale): interferenza sulla L2 condivisa, verificata con `stress_mem` il 2026-09-18.
+
+In sintesi: la L2 da 512 KB è condivisa fra i quattro Cortex-A53, e **una sola copia a schermo intero muove 2,4 MB**, cioè ~5× la capienza della cache. Ogni present azzera il working set del thread RT su CPU3. Le tre architetture differiscono per **quante volte al secondo** questo accade e **quante passate** fanno sui pixel:
+
+| | tetto al tasso di present | passate sui pixel per ridisegno |
+|---|---|---|
+| **Qt** | ❌ **nessuno** (`app.exec()`, event-driven) | `QImage::copy` + backing store + flush QPA |
+| **SDL** | ✅ 16 ms | 2 copie + composizione a schermo intero + conversione RGB565→ARGB8888 |
+| **DRM** | ✅ 16 ms | 1,62 copie a schermo intero, **RGB565 nativo end-to-end** |
 
 ---
 

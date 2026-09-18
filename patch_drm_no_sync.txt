@@ -1,0 +1,113 @@
+Patch — interruttore per disattivare lo snapshot integrale (path DRM)
+=====================================================================
+File:   pegenstein/PegLib/peglvglwindow.cpp
+Attiva: solo con  PEG_DRM_NO_SYNC=1   (default spento, comportamento invariato)
+
+A COSA SERVE
+------------
+Oggi flushPresent() esegue syncBackFromPeg() -- una copia INTEGRALE dello schermo
+(614 400 px = 1,17 MiB letti dalla RAM cachata) -- prima di ogni page flip.
+Con PEG_DRM_COND_SYNC=1 la copia diventa condizionale, ma viene saltata solo se
+il danno accumulato sta sotto il 15% dello schermo: siccome il bounding box di
+mergeDirtyRegion misura in media il 31%, la copia si fa quasi sempre.
+
+Questa patch permette di toglierla DEL TUTTO, per verificare se il meccanismo di
+catch-up (gia' presente in blitDirtyRegion) basta da solo a tenere l'immagine
+corretta. Il commento nel codice dichiara che lo snapshot "riscrive sopra il
+lavoro incrementale appena fatto", quindi in teoria e' ridondante.
+
+⚠️ NON ASPETTARSI UN MIGLIORAMENTO DEL JITTER DA QUESTA PATCH DA SOLA.
+   Togliendo lo snapshot si passa da ~1 179 000 a ~565 000 pixel letti per
+   present: meta' del traffico, ma ancora 2,4 volte il budget di 235 000 px
+   (512 KB di L2 meno i ~50 KB che servono al thread RT). Si resta SOPRA la
+   soglia, e sopra soglia lo sfratto della cache e' totale comunque.
+   Lo scopo di questa patch e' un TEST DI CORRETTEZZA, non di prestazione:
+   serve a sapere se si puo' procedere con la sistemazione di mergeDirtyRegion,
+   che e' l'altra meta' necessaria per scendere sotto soglia.
+
+
+MODIFICA 1 -- nuovo helper, subito dopo rtDrmSyncStatsEnabled() (~riga 135)
+---------------------------------------------------------------------------
+
+int rtDrmNoSyncEnabled()                                        // [AI-NOSYNC]
+{                                                               // [AI-NOSYNC]
+    const char *env = getenv("PEG_DRM_NO_SYNC");                // [AI-NOSYNC]
+    return (env != NULL && atoi(env) != 0) ? 1 : 0;             // [AI-NOSYNC]
+}                                                               // [AI-NOSYNC]
+
+
+MODIFICA 2 -- in flushPresent(), righe 733-740
+-----------------------------------------------
+
+PRIMA:
+
+        static const int condSync   = rtDrmCondSyncEnabled();   // [AI-SYNC] letto una volta sola
+        static const int statsOn    = rtDrmSyncStatsEnabled();  // [AI-SYNC]
+
+        const bool needed = m_drmOutput->needsFullSyncBeforeFlip(); // [AI-SYNC]
+
+        if (needed || !condSync)                                // [AI-SYNC]
+
+DOPO:
+
+        static const int condSync   = rtDrmCondSyncEnabled();   // [AI-SYNC] letto una volta sola
+        static const int statsOn    = rtDrmSyncStatsEnabled();  // [AI-SYNC]
+        static const int noSync     = rtDrmNoSyncEnabled();     // [AI-NOSYNC]
+
+        const bool needed = m_drmOutput->needsFullSyncBeforeFlip(); // [AI-SYNC]
+
+        if (!noSync && (needed || !condSync))                   // [AI-NOSYNC] snapshot disattivabile
+
+Nient'altro. I contatori [AI-SYNC] restano validi e diventano la conferma che
+l'interruttore ha preso: con PEG_DRM_NO_SYNC=1 la riga deve mostrare fullsync=0.
+
+
+RICOMPILAZIONE
+--------------
+    touch pegenstein/PegLib/peglvglwindow.cpp pegenstein/PegLib/peg_run.cpp
+
+(senza il touch, make non ricompila: guarda le date dei sorgenti, non i flag)
+
+
+COME VERIFICARE -- in quest'ordine
+-----------------------------------
+
+1) L'interruttore ha preso
+
+    PEGDRM_TOUCH_DEV=/dev/input/eventN PEG_DRM_NO_SYNC=1 PEG_DRM_SYNC_STATS=1 ./PegExec
+
+   Attesa: la riga [AI-SYNC] mostra  fullsync=0  con present che cresce.
+
+2) ⚠️ L'IMMAGINE E' CORRETTA -- e' il vero test, e si fa CON GLI OCCHI
+
+   Guardare lo schermo, non i numeri, durante:
+     - scroll delle liste (Die Set, Program List)
+     - pan/trascinamento del grafico 2D
+     - cambi pagina ripetuti
+     - visualizzatore 3D
+     - il lampeggiante e la banda di stato in alto
+
+   Cercare: rettangoli bianchi, strisce vecchie che restano, frame incompleti,
+   porzioni che "tornano indietro" di un frame.
+
+   Se compaiono artefatti -> il catch-up ha dei buchi. FERMARSI QUI: non ha senso
+   procedere con mergeDirtyRegion, e il difetto del catch-up e' il vero problema
+   da risolvere prima.
+
+3) Quanto traffico e' stato tolto
+
+    PEGDRM_TOUCH_DEV=/dev/input/eventN PEG_DRM_NO_SYNC=1 \
+      PEG_DRM_CATCHUP_STATS=1 PEG_DRM_SYNC_STATS=1 ./PegExec 2> /root/px.log
+
+   Dalle due righe si ricavano i pixel letti per present:
+
+       (catchup + dirty) x blit/present   +   fullsync/present x 614 400
+
+   Atteso con NO_SYNC=1: il secondo termine va a zero.
+   Budget da raggiungere (con anche mergeDirtyRegion sistemato): < 235 000 px.
+
+
+ROLLBACK
+--------
+Togliere la variabile d'ambiente: PEG_DRM_NO_SYNC non impostata = comportamento
+identico a oggi. Non serve ricompilare per tornare indietro.

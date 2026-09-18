@@ -1,0 +1,118 @@
+# Contesto di progetto — HMI pressa piegatrice, jitter real-time
+
+## Di cosa si tratta
+
+HMI industriale per pressa piegatrice su **NXP i.MX8M Plus** (4x Cortex-A53, Linux
+PREEMPT_RT). Framework grafico **PegLib** con rasterizzazione **software** (la GPU
+non e' coinvolta).
+
+**Obiettivo del lavoro:** ridurre l'interferenza della GUI sul thread real-time
+`COM RTC Handler` (CPU3, ciclo 4 ms). La grandezza controllata e' il ritardo di
+risveglio della `clock_nanosleep()`, che deve restare **sotto i 100 us**.
+
+> L'obiettivo NON e' aumentare il frame rate. Al contrario: diversi interventi
+> riducono deliberatamente i frame disegnati, accettando una grafica meno fluida
+> in cambio di determinismo temporale.
+
+---
+
+## Dove sta la documentazione
+
+Percorsi da WSL (su Windows sono sotto `C:\Leonardo\tesi\tracing_Imx8plus\`):
+
+| Percorso | Contenuto |
+|---|---|
+| `/mnt/c/Leonardo/tesi/tracing_Imx8plus/lvgl/pressa/perf_terminale/registro_test_rt.md` | **Registro della campagna** — ogni test, ogni misura, ogni ipotesi con esito |
+| `.../perf_terminale/modifiche_progetto.md` | Sintesi delle modifiche (documento per il relatore) |
+| `.../perf_terminale/appendice_tecnica_modifiche.md` | Appendice a livello di codice |
+| `/mnt/c/Leonardo/tesi/tracing_Imx8plus/handoff_rt_jitter_2026-09-15.md` | Stato al 15/09/2026 e decisioni aperte |
+| `/mnt/c/Leonardo/tesi/tracing_Imx8plus/stress_mem/` | Esperimento causale, mai eseguito |
+
+**Sorgenti:** `/home/leolevro/Sqvara-lvgl/Squeeze/` — quattro repo git distinti
+(`pressbrakepeg`, `pegenstein`, `SqCom_Library`, `PlcEsa`).
+
+---
+
+## Regola permanente: documentare nel registro
+
+**Ogni analisi, decisione, modifica e risultato di test va annotato in
+`registro_test_rt.md`**, seguendo lo stile delle sezioni esistenti:
+
+- ipotesi dichiarata prima della misura
+- configurazione completa del test (comprese le impostazioni a runtime, che non
+  stanno in git: cgroup, cmdline del kernel, variabili d'ambiente)
+- numeri grezzi, non solo conclusioni
+- verdetto esplicito: confermata, smentita, non conclusiva
+
+**Le rettifiche si scrivono, non si cancellano.** In questa campagna sono state
+ritirate cinque conclusioni a fronte di dati migliori. Ognuna e' documentata come
+tale, con la misura che la smentisce. Mantenere questa pratica: un risultato
+ritirato vale piu' di una conclusione difesa.
+
+---
+
+## Vincoli di sicurezza — non negoziabili
+
+**`ConfigButtonsStartStopPlusMinus`** configura i pulsanti fisici Start / Stop /
+Plus / Minus della macchina ed e' invocata dentro `AttivaMenu` per gli stati AUTO
+e SAUTO. Deve restare **sempre immediata**, mai differita, mai messa in coda.
+
+Differirla aprirebbe una finestra temporale in cui i comandi fisici della pressa
+non sono correttamente mappati. E' sicurezza macchina, non ottimizzazione.
+
+---
+
+## Regole metodologiche apprese sul campo
+
+**I test brevi non sono validi.** Gli eventi sopra i 90 us valgono pochi per
+milione di attivazioni. Un test da 10 minuti (150 000 attivazioni) ne contiene
+statisticamente meno di uno: un massimo di 60 us su quella scala non dimostra
+nulla. **Minimo un'ora per configurazione.**
+
+**Confrontare sempre a istruzioni costanti** quando si usano i contatori PMU. Il
+CPI e' un rapporto: fra campioni con conteggi di istruzioni diversi di 3x non ha
+significato.
+
+**`bus_cycles` non misura l'attivita' del bus.** Su sette campioni indipendenti
+`bus_cycles / cpu_cycles` vale 0,50: e' un orologio a meta' della frequenza CPU,
+cioe' un contatore di tempo. Ogni metrica derivata da esso e' priva di contenuto.
+
+**La strumentazione non deve alterare la grandezza misurata.** `fprintf` con
+`fflush` e' I/O sincrono e falsa le misure a livello di 100 us. Tutta la
+diagnostica va dietro una guardia (`LISTE_DIAG_ENABLED`, `CAD_DIAG_CALCULATE`,
+`PEG_DIRTY_DIAG`) e spenta durante le sessioni di misura.
+
+**Un A/B deve cambiare una cosa sola.** Stesso carico, stesso numero di
+attivazioni, stessa configurazione a runtime. Cambiare codice e carico insieme
+produce dati non interpretabili.
+
+---
+
+## Convenzioni di codice
+
+**Commit:** usare la skill `esa-rules:commit` — Conventional Commits, in inglese,
+imperativo presente, soggetto entro 72 caratteri, corpo solo quando il "perche'"
+non si deduce dal diff.
+
+**Marcatori nei commenti:** `[AI]` per le modifiche permanenti, `[AI-<TAG>]` per
+la strumentazione temporanea (`[AI-SEQ]`, `[AI-SYNC]`, `[AI-DIRTY]`). Quelli
+temporanei vanno rimossi prima del commit.
+
+**Ogni compromesso va commentato nel punto in cui sta**, con cosa si guadagna,
+cosa si perde e come tornare indietro. Esempio: `kPanMinRedrawIntervalMs = 33`
+in `sim2d/Sim2DView.cpp`.
+
+**File generati fuori da git.** In `pegenstein` sono finiti sotto controllo di
+versione `PegLib/Makefile` (80 582 righe), `Makefile` e `.qmake.stash`. Da
+rimuovere con `git rm --cached` e aggiungere a `.gitignore`.
+
+---
+
+## Skill utili
+
+| Skill | Quando |
+|---|---|
+| `esa-ask:ask` | domande di sola lettura sul codice |
+| `esa-rules:commit` | qualunque messaggio di commit |
+| `superpowers:systematic-debugging` | indagini su bug o comportamenti anomali |
+| `superpowers:verification-before-completion` | prima di dichiarare che un intervento ha funzionato |

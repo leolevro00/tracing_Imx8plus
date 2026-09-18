@@ -45,13 +45,14 @@
  *     $CC -O2 -o stress_mem stress_mem.c -lpthread
  *
  * Uso:
- *     ./stress_mem [stream|l2fit|thrash] [MB] [nthread] [pausa_us]
+ *     ./stress_mem [stream|l2fit|thrash] [MB | NNNk] [nthread] [pausa_us]
  *
  * Esempi:
  *     ./stress_mem l2fit                 # controllo negativo
  *     ./stress_mem stream                # trattamento (8 MB, 3 thread)
  *     ./stress_mem thrash                # discriminante (pausa 200 us)
  *     ./stress_mem thrash 8 3 1000       # discriminante a banda ancora piu' bassa
+ *     ./stress_mem stream 128k 3 0       # curva dose-risposta: buffer in KB
  *
  * Terminare con Ctrl-C o SIGTERM: stampa le statistiche di banda.
  * ===========================================================================
@@ -200,8 +201,17 @@ static void parse_args(int argc, char **argv)
     }
 
     if (argc > 2) {
-        long mb = strtol(argv[2], NULL, 10);
-        if (mb > 0) g_bufsz = (size_t)mb << 20;
+        /* Valore in MB, come prima. Con suffisso 'k' o 'K' e' in KB: serve per
+           la curva dose-risposta, dove il ginocchio atteso sta SOTTO l'MB
+           (512 KB di L2 / 2 buffer / 3 thread = ~85 KB per buffer). */
+        char *end = NULL;
+        long v = strtol(argv[2], &end, 10);
+        if (v > 0) {
+            if (end && (*end == 'k' || *end == 'K'))
+                g_bufsz = (size_t)v << 10;
+            else
+                g_bufsz = (size_t)v << 20;
+        }
     }
     if (argc > 3) {
         long n = strtol(argv[3], NULL, 10);

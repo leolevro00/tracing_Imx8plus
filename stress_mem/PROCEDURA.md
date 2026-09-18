@@ -77,6 +77,39 @@ una giornata.
 
 ---
 
+## ⚠️ Aggiornamento 2026-09-18 — leggere prima di eseguire
+
+Questa procedura è di **luglio 2026**, quando `PerfMonitor` era sempre attivo. Dal
+**2026-09-17** è **spento di default** (`RTCHndlr.cpp`, blocco `[AI-PERFOPT]`): si
+riattiva solo con `PERF_ENABLE=1`.
+
+La procedura legge proprio le statistiche di PerfMonitor, quindi **senza quella
+variabile le quattro fasi non producono i dati attesi**:
+
+```bash
+PERF_ENABLE=1 ./Lnk &
+```
+
+Da sapere:
+
+- ⚠️ PerfMonitor **gonfia il jitter** (misurato il 2026-09-17: SDL max 156 → 111 µs
+  togliendolo). Qui **va tenuto acceso comunque**: la perturbazione è presente in
+  tutte e quattro le fasi, quindi il confronto interno resta valido, ed è l'unico
+  modo per confrontarsi con i riferimenti documentati (12,9 % a riposo → 20,9 %
+  sotto carico GUI). **I valori assoluti non sono confrontabili** con le campagne
+  fatte senza PerfMonitor.
+- 🔑 I contatori PMU sono qui la **prova del meccanismo**, non un contorno: in un
+  esperimento di sfratto cache devono salire i **refill** a **istruzioni costanti**.
+  È la firma che nessuna ipotesi alternativa produce. Confrontare sempre campioni a
+  istruzioni costanti: il CPI è un rapporto e non è confrontabile fra campioni
+  disomogenei.
+- Salvare i risultati in **`/root`**, non in `/tmp`: è tmpfs e si perde al riavvio
+  (è già successo con i file IRQ del 17/09).
+- Nessuna GUI in esecuzione: nel path attuale il processo si chiama **`PegExec`**,
+  non `pegmain`.
+
+---
+
 ## Procedura
 
 Per ogni fase: avviare `Lnk` **senza HMI**, lasciarlo girare almeno **5 minuti**
