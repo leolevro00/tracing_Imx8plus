@@ -1,0 +1,238 @@
+diff --git a/Lnk/PlcExec.cpp b/Lnk/PlcExec.cpp
+index b202ecc..39bada4 100644
+--- a/Lnk/PlcExec.cpp
++++ b/Lnk/PlcExec.cpp
+@@ -118,6 +118,184 @@ HANDLE PlcSupervisorHandle = INVALID_HANDLE_VALUE;
+ HANDLE PLCSemaphore[MAX_PLC];
+ HANDLE PlcSupervisorSemaphore;
+ 
++// ===================== [AI-PLCLAT] latenza di risveglio sul semaforo =====================
++// Misura il tratto:  ReleaseSemaphore(PLCSemaphore[Plc])  ->  ritorno della
++// WaitForSingleObject nel thread PLC.
++//
++// E' lo stadio SUCCESSIVO al risveglio dalla clock_nanosleep gia' misurato in
++// RTCHndlr.cpp. I due numeri NON vanno sommati ne' confusi: sono due tratti in
++// serie della stessa catena.
++//     timer -> handler   : clock_nanosleep, RTCHndlr.cpp   (la misura storica)
++//     post  -> thread PLC: questa                          (lo stadio dopo)
++//
++// SPENTA DI DEFAULT. E' codice nel percorso RT, e in questa campagna e' gia'
++// stato misurato che la strumentazione gonfia il jitter (PerfMonitor, 2026-09-17:
++// SDL max 156 -> 111 us togliendolo). Abilitare con:
++//     export PLC_LAT_STATS=1
++//     export PLC_LAT_WARMUP=15000     (opzionale, default 15000)
++//     export PLC_LAT_EVERY=15000      (opzionale, default 15000 ~ 60 s a 4 ms)
++#include <time.h>                                               // [AI-PLCLAT]
++#include <stdint.h>                                             // [AI-PLCLAT]
++
++// minAllowed = 0 per il warm-up (0 = nessun warm-up, valore legittimo),
++// = 1 per il periodo di stampa (0 farebbe un modulo per zero).
++static unsigned plcLatEnvU(const char *name, unsigned def, long minAllowed) // [AI-PLCLAT]
++{                                                               // [AI-PLCLAT]
++	const char *env = getenv(name);                             // [AI-PLCLAT]
++	if (env == NULL || *env == '\0') return def;                // [AI-PLCLAT]
++	char *end = NULL;                                           // [AI-PLCLAT]
++	long v = strtol(env, &end, 10);                             // [AI-PLCLAT]
++	if (end == env || v < minAllowed) return def;               // [AI-PLCLAT] non numerico o fuori range
++	return (unsigned)v;                                         // [AI-PLCLAT]
++}                                                               // [AI-PLCLAT]
++
++int plcLatEnabled()                                             // [AI-PLCLAT] non static: usata anche da main.cpp
++{                                                               // [AI-PLCLAT]
++	static int cached = -1;                                     // [AI-PLCLAT]
++	if (cached < 0)                                             // [AI-PLCLAT]
++	{                                                           // [AI-PLCLAT]
++		const char *env = getenv("PLC_LAT_STATS");              // [AI-PLCLAT]
++		cached = (env != NULL && atoi(env) != 0) ? 1 : 0;        // [AI-PLCLAT]
++		// Banner alla PRIMA chiamata in assoluto, prima di qualunque filtro:
++		// cosi' "nessun output" puo' voler dire solo una cosa, cioe' che il
++		// binario in esecuzione non ha questa strumentazione.
++		if (cached)                                             // [AI-PLCLAT]
++		{                                                       // [AI-PLCLAT]
++			printf("[PLCLAT] attivo (build %s %s) - warmup=%u every=%u\n", // [AI-PLCLAT]
++			       __DATE__, __TIME__,                          // [AI-PLCLAT]
++			       plcLatEnvU("PLC_LAT_WARMUP", 15000, 0),      // [AI-PLCLAT]
++			       plcLatEnvU("PLC_LAT_EVERY", 15000, 1));      // [AI-PLCLAT]
++			fflush(stdout);                                     // [AI-PLCLAT]
++		}                                                       // [AI-PLCLAT]
++	}                                                           // [AI-PLCLAT]
++	return cached;                                              // [AI-PLCLAT]
++}                                                               // [AI-PLCLAT]
++
++uint64_t plcLatNowNs()                                          // [AI-PLCLAT] non static: usata anche da main.cpp
++{                                                               // [AI-PLCLAT]
++	struct timespec ts;                                         // [AI-PLCLAT]
++	clock_gettime(CLOCK_MONOTONIC, &ts);                        // [AI-PLCLAT]
++	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; // [AI-PLCLAT]
++}                                                               // [AI-PLCLAT]
++
++// Istante della post, scritto dallo scheduler e letto dal thread PLC.
++// Non serve lock: il semaforo stabilisce l'ordinamento (la post avviene-prima
++// del ritorno della wait), quindi il valore e' visibile e stabile.
++static volatile uint64_t g_plcLatPostNs[MAX_PLC] = {0, 0};      // [AI-PLCLAT]
++
++// TUTTI i thread RT stanno sullo stesso core: RT_THREAD_AFFINITY_MASK = 0x08,
++// cioe' CPU3 (esaconfig.h). Lo scheduler ha priorita' PIU' ALTA del PLC
++// (ertt_PPLCSCHED > ertt_PPLCFAST), quindi dopo la post il PLC e' RUNNABLE ma
++// NON puo' girare finche' lo scheduler non si blocca e cede la CPU.
++//
++// Misurare da "post" darebbe quindi  coda_scheduler + risveglio  in un numero
++// solo. Il riferimento giusto per il RISVEGLIO PURO e' l'istante in cui la CPU
++// torna disponibile, cioe' quando PlcScheduler rientra nella sua wait.
++//
++//    post ──────────────► scheduler bloccato ──────────────► PLC in esecuzione
++//         \__ coda sched __/                 \__ risveglio __/
++//
++// Scritto da PlcScheduler (main.cpp), letto dal thread PLC.
++volatile uint64_t g_plcLatSchedBlockNs = 0;                     // [AI-PLCLAT]
++
++// Stato di bIsPlcRunning[Plc] al momento della post: se il PLC era ANCORA dentro
++// la scansione precedente, il semaforo (conteggio max 1) resta segnalato e la
++// wait ritorna subito. Quel campione non e' un risveglio: e' "quanto e' rimasto
++// occupato il PLC". Va scartato, non mediato.
++static volatile int g_plcLatBusyAtPost[MAX_PLC] = {0, 0};       // [AI-PLCLAT]
++
++// Fasce identiche a quelle di RTCHndlr.cpp, per poter confrontare i due stadi.
++static unsigned g_plcLatN[MAX_PLC]      = {0, 0};               // [AI-PLCLAT]
++static unsigned g_plcLat60_70[MAX_PLC]  = {0, 0};               // [AI-PLCLAT]
++static unsigned g_plcLat71_80[MAX_PLC]  = {0, 0};               // [AI-PLCLAT]
++static unsigned g_plcLat81_90[MAX_PLC]  = {0, 0};               // [AI-PLCLAT]
++static unsigned g_plcLat91_99[MAX_PLC]  = {0, 0};               // [AI-PLCLAT]
++static unsigned g_plcLatOver[MAX_PLC]   = {0, 0};               // [AI-PLCLAT] > 100 us
++static double   g_plcLatMax[MAX_PLC]    = {-1.0, -1.0};         // [AI-PLCLAT] massimo globale
++static double   g_plcLatMin[MAX_PLC]    = {1e12, 1e12};         // [AI-PLCLAT]
++static double   g_plcLatWinMax[MAX_PLC] = {-1.0, -1.0};         // [AI-PLCLAT] massimo della finestra
++static double   g_plcLatSum[MAX_PLC]    = {0.0, 0.0};           // [AI-PLCLAT]
++static unsigned g_plcLatSkipped[MAX_PLC]= {0, 0};               // [AI-PLCLAT] scartati nel warm-up
++static unsigned g_plcLatBusyN[MAX_PLC]  = {0, 0};               // [AI-PLCLAT] scartati: PLC ancora occupato
++static unsigned g_plcLatCalls[MAX_PLC]  = {0, 0};               // [AI-PLCLAT] risvegli totali, prima dei filtri
++static double   g_plcSchedMax[MAX_PLC]  = {-1.0, -1.0};         // [AI-PLCLAT] coda scheduler: post -> blocco
++static double   g_plcSchedMin[MAX_PLC]  = {1e12, 1e12};         // [AI-PLCLAT]
++static double   g_plcSchedSum[MAX_PLC]  = {0.0, 0.0};           // [AI-PLCLAT]
++
++// Chiamata dal thread PLC subito DOPO il ritorno della wait.
++static void plcLatRecord(int Plc)                               // [AI-PLCLAT]
++{                                                               // [AI-PLCLAT]
++	const uint64_t now   = plcLatNowNs();                       // [AI-PLCLAT] subito, prima di tutto
++	g_plcLatCalls[Plc]++;                                       // [AI-PLCLAT] conta TUTTO, prima dei filtri
++	const uint64_t post  = g_plcLatPostNs[Plc];                 // [AI-PLCLAT]
++	const uint64_t block = g_plcLatSchedBlockNs;                // [AI-PLCLAT]
++	if (post == 0)                                              // [AI-PLCLAT] nessuna post registrata
++		return;                                                 // [AI-PLCLAT]
++
++	// Il PLC era ancora dentro la scansione precedente: non e' un risveglio.
++	if (g_plcLatBusyAtPost[Plc])                                // [AI-PLCLAT]
++	{                                                           // [AI-PLCLAT]
++		g_plcLatBusyN[Plc]++;                                   // [AI-PLCLAT]
++		return;                                                 // [AI-PLCLAT]
++	}                                                           // [AI-PLCLAT]
++
++	// RISVEGLIO PURO: dall'istante in cui la CPU e' tornata disponibile.
++	// Se il blocco dello scheduler e' anteriore alla post (o non registrato),
++	// il riferimento resta la post.
++	const uint64_t ref = (block > post) ? block : post;         // [AI-PLCLAT]
++	const double us      = (double)(now - ref)   / 1000.0;      // [AI-PLCLAT] risveglio
++	const double usSched = (double)(ref - post)  / 1000.0;      // [AI-PLCLAT] coda scheduler
++
++	// Il transitorio di avvio produce spike non rappresentativi del regime:
++	// stesso motivo e stesso default del warm-up di RTCHndlr.cpp.
++	static const unsigned warmup = plcLatEnvU("PLC_LAT_WARMUP", 15000, 0); // [AI-PLCLAT] 0 = nessun warm-up
++	if (g_plcLatSkipped[Plc] < warmup)                          // [AI-PLCLAT]
++	{                                                           // [AI-PLCLAT]
++		g_plcLatSkipped[Plc]++;                                 // [AI-PLCLAT]
++		return;                                                 // [AI-PLCLAT]
++	}                                                           // [AI-PLCLAT]
++
++	g_plcLatN[Plc]++;                                           // [AI-PLCLAT]
++	g_plcLatSum[Plc] += us;                                     // [AI-PLCLAT]
++	if (us > g_plcLatMax[Plc])    g_plcLatMax[Plc]    = us;     // [AI-PLCLAT]
++	if (us < g_plcLatMin[Plc])    g_plcLatMin[Plc]    = us;     // [AI-PLCLAT]
++	if (us > g_plcLatWinMax[Plc]) g_plcLatWinMax[Plc] = us;     // [AI-PLCLAT]
++
++	g_plcSchedSum[Plc] += usSched;                              // [AI-PLCLAT]
++	if (usSched > g_plcSchedMax[Plc]) g_plcSchedMax[Plc] = usSched; // [AI-PLCLAT]
++	if (usSched < g_plcSchedMin[Plc]) g_plcSchedMin[Plc] = usSched; // [AI-PLCLAT]
++
++	if      (us >= 60.0 && us <  71.0) g_plcLat60_70[Plc]++;    // [AI-PLCLAT]
++	else if (us >= 71.0 && us <  81.0) g_plcLat71_80[Plc]++;    // [AI-PLCLAT]
++	else if (us >= 81.0 && us <  91.0) g_plcLat81_90[Plc]++;    // [AI-PLCLAT]
++	else if (us >= 91.0 && us < 100.0) g_plcLat91_99[Plc]++;    // [AI-PLCLAT]
++	else if (us >= 100.0)              g_plcLatOver[Plc]++;     // [AI-PLCLAT]
++
++	// Stampa rada: l'I/O qui e' nel percorso RT. Una riga sola, greppabile.
++	static const unsigned every = plcLatEnvU("PLC_LAT_EVERY", 15000, 1); // [AI-PLCLAT] min 1: evita il modulo per zero
++	if ((g_plcLatN[Plc] % every) == 0)                          // [AI-PLCLAT]
++	{                                                           // [AI-PLCLAT]
++		printf("[PLCLAT] %-4s risvegli=%u  usati=%u  scartati: PLC occupato=%u warm-up=%u\n"   // [AI-PLCLAT]
++		       "   risveglio  : min=%.1f avg=%.1f max=%.1f us | 60-70:%u 71-80:%u 81-90:%u 91-99:%u >100:%u | finestra max=%.1f\n" // [AI-PLCLAT]
++		       "   coda sched : min=%.1f avg=%.1f max=%.1f us   (post -> scheduler bloccato)\n", // [AI-PLCLAT]
++		       (Plc == PLC_FAST) ? "FAST" : "SLOW",             // [AI-PLCLAT]
++		       g_plcLatCalls[Plc], g_plcLatN[Plc],              // [AI-PLCLAT]
++		       g_plcLatBusyN[Plc], g_plcLatSkipped[Plc],        // [AI-PLCLAT]
++		       g_plcLatMin[Plc],                                // [AI-PLCLAT]
++		       g_plcLatSum[Plc] / (double)g_plcLatN[Plc],       // [AI-PLCLAT]
++		       g_plcLatMax[Plc],                                // [AI-PLCLAT]
++		       g_plcLat60_70[Plc], g_plcLat71_80[Plc],          // [AI-PLCLAT]
++		       g_plcLat81_90[Plc], g_plcLat91_99[Plc],          // [AI-PLCLAT]
++		       g_plcLatOver[Plc], g_plcLatWinMax[Plc],          // [AI-PLCLAT]
++		       g_plcSchedMin[Plc],                              // [AI-PLCLAT]
++		       g_plcSchedSum[Plc] / (double)g_plcLatN[Plc],     // [AI-PLCLAT]
++		       g_plcSchedMax[Plc]);                             // [AI-PLCLAT]
++		fflush(stdout);                                         // [AI-PLCLAT]
++		g_plcLatWinMax[Plc] = -1.0;                             // [AI-PLCLAT]
++	}                                                           // [AI-PLCLAT]
++}                                                               // [AI-PLCLAT]
++// =================== fine [AI-PLCLAT] ===================
++
+ #ifndef _RT_TARGET_
+ BOOLEAN glb_fAwaitEndScans;
+ static HANDLE  PLCSemaphoreEndScan[MAX_PLC];
+@@ -2932,6 +3110,8 @@ retThreadValProt GoPlcFast (void *DummyVoid)
+ #endif
+ 		//EsaOS_mtx_WaitForSingleObject(PLCSemaphore[PLC_FAST], INFINITE, FALSE);
+ 		WaitForSingleObject(PLCSemaphore[PLC_FAST], INFINITE);
++		if (plcLatEnabled())                                    // [AI-PLCLAT]
++			plcLatRecord(PLC_FAST);                             // [AI-PLCLAT] per SLOW: stessa riga a 2520 con PLC_SLOW
+ #if defined (AVN) && defined (IMX8MP)
+ 		//EsaOS_setGpio3 (1);
+ 		EsaOS_toggleGpio3();
+@@ -3461,6 +3641,11 @@ static void InternalPlcManager(int Plc)
+ 				bret = FALSE; // watchdog per blocco plc Fast
+ 
+ 			// Risveglia il task del plc selezionato
++			if (plcLatEnabled())                                    // [AI-PLCLAT]
++			{                                                       // [AI-PLCLAT]
++				g_plcLatBusyAtPost[Plc] = bIsPlcRunning[Plc] ? 1 : 0; // [AI-PLCLAT]
++				g_plcLatPostNs[Plc] = plcLatNowNs();                // [AI-PLCLAT]
++			}                                                       // [AI-PLCLAT]
+ 			bret = ReleaseSemaphore(PLCSemaphore[Plc], 1, nullptr);
+ 
+ #ifndef _RT_TARGET_
+diff --git a/Lnk/main.cpp b/Lnk/main.cpp
+index 56d34d0..2134d3f 100644
+--- a/Lnk/main.cpp
++++ b/Lnk/main.cpp
+@@ -58,6 +58,11 @@ extern uintptr_t  InstallLogSystem ();
+ extern void TerminateLogSystem ();
+ void* PlcScheduler (void *p);
+ 
++// [AI-PLCLAT] definiti in PlcExec.cpp
++extern volatile uint64_t g_plcLatSchedBlockNs;                  // [AI-PLCLAT]
++int  plcLatEnabled();                                           // [AI-PLCLAT]
++uint64_t plcLatNowNs();                                         // [AI-PLCLAT]
++
+ void LnkUsage(void)
+ {
+ 	fprintf(stderr, "\nUsage: lnk [ -v ] -c<defcn> -i<iofile> -f<lnkfast.cmd> -s<lnkslow.cmd> [ -e<file.err> ]\n");
+@@ -1577,6 +1582,11 @@ void* PlcScheduler (void *p)
+ 	while (true)
+ 	{
+ 		EsaOS_resDebugSig (PP_USR_SIG2);
++		// [AI-PLCLAT] Istante in cui lo scheduler cede la CPU: e' il riferimento
++		// per il risveglio PURO del thread PLC, che gira sullo stesso core (CPU3)
++		// con priorita' piu' bassa e quindi non puo' partire prima di qui.
++		if (plcLatEnabled())                                    // [AI-PLCLAT]
++			g_plcLatSchedBlockNs = plcLatNowNs();               // [AI-PLCLAT]
+ 		bret = WaitForSingleObject (PlcSyncRTCSemaphore, INFINITE) == WAIT_OBJECT_0;
+ 
+ 		EsaOS_setDebugSig (PP_USR_SIG2);

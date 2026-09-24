@@ -1,0 +1,119 @@
+Patch diagnostica — contatore dei ridisegni sul path Qt
+========================================================
+File:   pegenstein/PegLib/pegmainwindow.cpp
+Scopo:  misurare ridisegni/s, rettangoli/ridisegno e pixel/ridisegno del path Qt,
+        per poterli confrontare con i present/s del path DRM.
+Attiva: solo con  PEG_QT_PAINT_STATS=1  (default spento, comportamento invariato).
+
+Perche' serve
+-------------
+Il path DRM accumula le invalidazioni e presenta a orologio (tetto 16 ms, ~50/s
+effettivi per via del Sleep(10) del loop). Il path Qt gira su app.exec(), quindi
+ridipinge appena l'event loop smaltisce l'update: nessun tetto.
+
+PEG invalida al ritmo del suo timer (10 ms, ~100 Hz) piu' gli eventi touch, quindi
+Qt potrebbe ridipingere ~2x rispetto al DRM. Ma gli eventi > 60 us sono ~100x.
+Il fattore mancante sono i byte per ridisegno, e questa patch li conta.
+
+
+1) In testa al file, dopo gli #include
+--------------------------------------
+
+#include <cstdlib>                                              // [AI-QTPAINT]
+#include <cstdio>                                               // [AI-QTPAINT]
+#include <QElapsedTimer>                                        // [AI-QTPAINT]
+
+namespace {                                                     // [AI-QTPAINT]
+int qtPaintStatsEnabled()                                       // [AI-QTPAINT]
+{                                                               // [AI-QTPAINT]
+    const char *env = std::getenv("PEG_QT_PAINT_STATS");        // [AI-QTPAINT]
+    return (env && env[0] == '1') ? 1 : 0;                      // [AI-QTPAINT]
+}                                                               // [AI-QTPAINT]
+unsigned  g_qtPaints    = 0;   // paintEvent completati          [AI-QTPAINT]
+unsigned  g_qtRects     = 0;   // rettangoli totali disegnati    [AI-QTPAINT]
+unsigned long long g_qtPixels = 0; // pixel totali copiati       [AI-QTPAINT]
+}                                                               // [AI-QTPAINT]
+
+const int kQtPaintReportEvery = 200;                            // [AI-QTPAINT]
+
+
+2) In paintEvent, subito dopo  QPainter painter(this);
+-------------------------------------------------------
+
+    static const int paintStats = qtPaintStatsEnabled();        // [AI-QTPAINT]
+    static QElapsedTimer s_qtClock;                             // [AI-QTPAINT]
+    if (paintStats && !s_qtClock.isValid())                     // [AI-QTPAINT]
+    {                                                           // [AI-QTPAINT]
+        s_qtClock.start();                                      // [AI-QTPAINT]
+    }                                                           // [AI-QTPAINT]
+
+
+3) Dentro il ciclo  for (auto r : list),  nel ramo  if (r.isValid() ...)
+------------------------------------------------------------------------
+   subito DOPO  painter.drawImage(r, update_area);
+
+                ++g_qtRects;                                    // [AI-QTPAINT]
+                g_qtPixels += (unsigned long long)r.width()     // [AI-QTPAINT]
+                            * (unsigned long long)r.height();   // [AI-QTPAINT]
+
+
+4) In fondo a paintEvent, DOPO la chiusura del blocco #endif delle strategie
+-----------------------------------------------------------------------------
+   (cioe' come ultima cosa dentro  if (p) { ... })
+
+        if (paintStats)                                         // [AI-QTPAINT]
+        {                                                       // [AI-QTPAINT]
+            if (++g_qtPaints >= (unsigned)kQtPaintReportEvery)  // [AI-QTPAINT]
+            {                                                   // [AI-QTPAINT]
+                const double sec = s_qtClock.restart() / 1000.0; // [AI-QTPAINT]
+                const double fbPx = (double)m_Width * (double)m_Height; // [AI-QTPAINT]
+                fprintf(stderr,                                 // [AI-QTPAINT]
+                    "[QT-PAINT] paints=%u in %.2fs -> %.1f/s | "  // [AI-QTPAINT]
+                    "rect/paint=%.2f | px/paint=%.0f (%.1f%% schermo)\n", // [AI-QTPAINT]
+                    g_qtPaints, sec,                            // [AI-QTPAINT]
+                    sec > 0.0 ? g_qtPaints / sec : 0.0,          // [AI-QTPAINT]
+                    (double)g_qtRects / (double)g_qtPaints,      // [AI-QTPAINT]
+                    (double)g_qtPixels / (double)g_qtPaints,     // [AI-QTPAINT]
+                    fbPx > 0.0 ? 100.0 * (double)g_qtPixels      // [AI-QTPAINT]
+                                 / ((double)g_qtPaints * fbPx) : 0.0); // [AI-QTPAINT]
+                fflush(stderr);                                 // [AI-QTPAINT]
+                g_qtPaints = 0;                                 // [AI-QTPAINT]
+                g_qtRects  = 0;                                 // [AI-QTPAINT]
+                g_qtPixels = 0;                                 // [AI-QTPAINT]
+            }                                                   // [AI-QTPAINT]
+        }                                                       // [AI-QTPAINT]
+
+
+Uso
+---
+    PEG_QT_PAINT_STATS=1 ./PegExec 2> /root/qt_paint.log
+
+Riga attesa, una ogni 200 ridisegni:
+
+    [QT-PAINT] paints=200 in 2.05s -> 97.6/s | rect/paint=3.40 | px/paint=184000 (30.0% schermo)
+
+Come leggerla
+-------------
+  ridisegni/s   da confrontare con i ~50 present/s del path DRM.
+                Se e' ~100/s, il fattore frequenza e' 2x e il resto viene dai byte.
+                Se e' molto piu' alto, il tetto mancante spiega tutto da solo.
+
+  px/paint      da confrontare con i 614 400 px di uno schermo intero.
+                Il DRM ne muove ~1,62 schermi per present (snapshot + catch-up).
+                Questo numero NON include cio' che fa il plugin QPA dopo
+                (backing store -> pannello): con eglfs c'e' una composizione a
+                schermo intero in piu', con linuxfb solo la regione danneggiata.
+
+  rect/paint    quanti rettangoli distinti per ridisegno. Su Qt restano separati
+                (QRegion), a differenza del bounding box unico di mergeDirtyRegion.
+                Ogni rettangolo e' anche UNA ALLOCAZIONE (QImage::copy): se sono
+                molti e grandi (> 128 KB, cioe' > ~65 000 px), ognuno passa da
+                mmap/munmap -> TLB shootdown -> IPI su CPU3.
+
+Da annotare insieme al risultato
+--------------------------------
+  - il plugin QPA effettivamente usato (eglfs / linuxfb / default)
+  - il .rec di carico_gui, per confrontabilita' con le altre campagne
+
+ATTENZIONE: e' una build strumentata, stampa su stderr ogni 200 ridisegni.
+NON usarla per misurare il jitter: serve solo a caratterizzare il path Qt.

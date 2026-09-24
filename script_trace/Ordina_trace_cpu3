@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Ordina_trace_cpu3 — legge l'output di `trace-cmd report`, tiene solo un core,
+e riscrive ogni ciclo con i tempi RELATIVI al risveglio di un thread bersaglio.
+
+    ./Ordina_trace_cpu3 trace.txt
+    ./Ordina_trace_cpu3 trace.txt --worst 5
+    ./Ordina_trace_cpu3 trace.txt --raw -n 3
+    ./Ordina_trace_cpu3 trace.txt --cpu 3 --target "PLC FAST"
+
+Un "ciclo" comincia al  sched_wakeup del bersaglio  (istante 0) e finisce al
+sched_wakeup successivo. Ogni riga porta lo scarto in us da quell'istante.
+"""
+import re, sys, argparse, statistics as st
+
+TS = re.compile(r"\[(\d+)\]\s+(\d+\.\d+):")
+# prefisso della riga: "<comm>-<pid>" = il thread che sta GIRANDO in quel momento
+RUN = re.compile(r"^\s*(.+?)-(\d+)\s+\[")
+WK = re.compile(r"sched_wakeup:\s+comm=(.+?) pid=(\d+)")
+SW = re.compile(r"sched_switch:\s+prev_comm=(.+?) prev_pid=(\d+).*?"
+                r"==> next_comm=(.+?) next_pid=(\d+)")
+
+def parse(path, cpu):
+    """Restituisce [(t, tipo, dati, riga_originale)] del solo core richiesto."""
+    out = []
+    with open(path, errors="replace") as f:
+        for line in f:
+            m = TS.search(line)
+            if not m or int(m.group(1)) != cpu:
+                continue
+            t = float(m.group(2))
+            r = RUN.match(line)
+            run = r.group(1).strip() if r else "?"      # chi occupa la CPU adesso
+            w = WK.search(line)
+            if w:
+                out.append((t, 'W', (w.group(1).strip(), run), line.rstrip()))
+                continue
+            s = SW.search(line)
+            if s:
+                out.append((t, 'S', (s.group(1).strip(), s.group(3).strip()), line.rstrip()))
+    return out
+
+def cicli(ev, target):
+    """Spezza gli eventi in cicli, uno per ogni risveglio del bersaglio."""
+    res, cur, t0 = [], None, None
+    for e in ev:
+        if e[1] == 'W' and e[2][0] == target:
+            if cur:
+                res.append((t0, cur))
+            t0, cur = e[0], [e]
+        elif cur is not None:
+            cur.append(e)
+            if e[1] == 'S' and e[2][0] == target:   # il bersaglio cede la CPU: ciclo chiuso
+                res.append((t0, cur)); cur, t0 = None, None
+    if cur:
+        res.append((t0, cur))
+    return res
+
+def attesa(t0, evs, target):
+    """us dal risveglio del bersaglio al momento in cui va davvero sulla CPU."""
+    for e in evs:
+        if e[1] == 'S' and e[2][1] == target:
+            return (e[0] - t0) * 1e6
+    return None
+
+def stampa(t0, evs, target, raw, idx, att):
+    head = f"════ ciclo {idx} ".ljust(58, "═")
+    print(f"\n{head}")
+    print(f"     t0 = {t0:.6f}   risveglio di «{target}»"
+          + (f"   ·   va in esecuzione dopo {att:.0f} us" if att is not None else ""))
+    print(f"     {'quando':>9}   {'chi gira':<18} {'cosa fa':<12}     {''}")
+    print("     " + "─" * 66)
+    for e in evs:
+        d = (e[0] - t0) * 1e6
+        if raw:
+            print(f"  {d:+7.0f} us  {e[3]}")
+            continue
+        if e[1] == 'W':
+            chi, run = e[2]
+            print(f"  {d:+7.0f} us   {run:<18} sveglia     ·    {chi}")
+        else:
+            prev, nxt = e[2]
+            mark = "  ⭐ PARTE" if nxt == target else ""
+            print(f"  {d:+7.0f} us   {prev:<18} SI BLOCCA   →    {nxt}{mark}")
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("file")
+    ap.add_argument("--cpu", type=int, default=3, help="core da tenere (default 3)")
+    ap.add_argument("--target", default="PLC FAST", help='thread bersaglio (default "PLC FAST")')
+    ap.add_argument("-n", type=int, default=3, help="quanti cicli mostrare (default 3)")
+    ap.add_argument("--worst", type=int, metavar="N", help="mostra gli N cicli con l'attesa più lunga")
+    ap.add_argument("--raw", action="store_true", help="righe originali invece del riassunto")
+    a = ap.parse_args()
+
+    ev = parse(a.file, a.cpu)
+    if not ev:
+        sys.exit(f"nessun evento sul core {a.cpu} in {a.file}")
+    cs = cicli(ev, a.target)
+    if not cs:
+        sys.exit(f'nessun risveglio di «{a.target}» sul core {a.cpu}')
+
+    dati = [(t0, evs, attesa(t0, evs, a.target)) for t0, evs in cs]
+    validi = [d for d in dati if d[2] is not None]
+
+    print(f"file   : {a.file}")
+    print(f"core   : {a.cpu}        bersaglio: «{a.target}»")
+    print(f"cicli  : {len(cs)}   (di cui {len(validi)} con esecuzione osservata)")
+
+    mostra = sorted(validi, key=lambda d: -d[2])[:a.worst] if a.worst else dati[:a.n]
+    if a.worst:
+        print(f"\n>>> i {len(mostra)} cicli con l'attesa più lunga <<<")
+    for i, (t0, evs, att) in enumerate(mostra, 1):
+        stampa(t0, evs, a.target, a.raw, i, att)
+
+    if validi:
+        v = sorted(d[2] for d in validi)
+        print("\n" + "═" * 58)
+        print(f"ATTESA dal risveglio all'esecuzione di «{a.target}» — {len(v)} cicli")
+        print(f"   min={v[0]:.0f}  mediana={st.median(v):.0f}  "
+              f"p95={v[int(len(v)*.95)]:.0f}  p99={v[int(len(v)*.99)]:.0f}  max={v[-1]:.0f} us")
+        occ, n = {}, 0
+        for t0, evs, att in validi:
+            if att is None: continue
+            n += 1; last, cur = t0, "(chi ha svegliato)"
+            for e in evs:
+                if e[1] != 'S': continue
+                occ[cur] = occ.get(cur, 0) + (e[0] - last) * 1e6
+                last, cur = e[0], e[2][1]
+                if e[2][1] == a.target: break
+        print(f"\nCHI occupa il core in quell'attesa:")
+        for k, val in sorted(occ.items(), key=lambda x: -x[1]):
+            print(f"   {k:<24} {val/n:7.2f} us/ciclo")
+
+if __name__ == "__main__":
+    main()
